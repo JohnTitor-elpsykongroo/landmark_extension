@@ -6,22 +6,30 @@
 # Target: Linux x86_64, NVIDIA RTX 5090 (compute capability sm_120),
 #         driver CUDA 13.0, 128 GB RAM.
 #
+# There is NO conda requirement. The repository imports only pip packages, so
+# a plain `python -m venv` is enough. conda is used here only as a convenient
+# supplier of `nvcc` for building the pointops CUDA extension; if the machine
+# already has a CUDA toolkit, or if you let pip install the nvcc wheel, no
+# conda is involved at all.
+#
 # Everything the Windows laptop needed workarounds for (MSVC host-compiler
 # version guard, Smart App Control blocking unsigned DLLs) does not exist
 # here, so this script is a plain, linear install.
 #
 # Usage:
-#   bash landmark_extension/env/setup_linux.sh                # full setup
-#   ENV_PREFIX=$HOME/envs/3dteethland bash .../setup_linux.sh  # custom prefix
+#   ENV_KIND=venv    bash landmark_extension/env/setup_linux.sh   # default: plain .venv
+#   ENV_KIND=conda   bash landmark_extension/env/setup_linux.sh   # conda env instead
 #   CUDA_INDEX=https://download.pytorch.org/whl/cu130 bash .../setup_linux.sh
-#   SKIP_TOOLKIT=1 bash .../setup_linux.sh                     # toolkit already present
+#   SKIP_TOOLKIT=1 bash .../setup_linux.sh    # nvcc already on PATH / in the env
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
 
+ENV_KIND="${ENV_KIND:-venv}"
 ENV_PREFIX="${ENV_PREFIX:-$HOME/envs/3dteethland}"
 PY_VERSION="${PY_VERSION:-3.10}"
 CUDA_INDEX="${CUDA_INDEX:-https://download.pytorch.org/whl/cu128}"
+NVCC_WHEEL="${NVCC_WHEEL:-nvidia-cuda-nvcc-cu12==12.8.93}"
 PYG_CUDA="${PYG_CUDA:-cu128}"
 TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-12.0}"   # sm_120 = RTX 5090
 SKIP_TOOLKIT="${SKIP_TOOLKIT:-0}"
@@ -32,41 +40,66 @@ PY="$ENV_PREFIX/bin/python"
 echo "==================================================================="
 echo " 3dteethland landmark environment"
 echo "   repo        : $REPO_ROOT"
+echo "   env kind    : $ENV_KIND"
 echo "   env prefix  : $ENV_PREFIX"
 echo "   torch index : $CUDA_INDEX"
 echo "   arch list   : $TORCH_CUDA_ARCH_LIST"
 echo "==================================================================="
 
-# --- 1. create the conda/mamba environment --------------------------------
+# --- 1. create the environment (venv by default, conda optional) ----------
 if [ -x "$PY" ]; then
     echo "[1/7] reusing existing environment at $ENV_PREFIX"
-else
-    echo "[1/7] creating environment at $ENV_PREFIX"
+elif [ "$ENV_KIND" = "conda" ]; then
+    echo "[1/7] creating conda environment at $ENV_PREFIX"
     if command -v mamba >/dev/null 2>&1; then
         mamba create -y -p "$ENV_PREFIX" "python=$PY_VERSION"
     elif command -v conda >/dev/null 2>&1; then
         conda create -y -p "$ENV_PREFIX" "python=$PY_VERSION"
     else
-        echo "ERROR: neither mamba nor conda found on PATH" >&2
+        echo "ERROR: ENV_KIND=conda but neither mamba nor conda is on PATH" >&2
         exit 1
     fi
+else
+    echo "[1/7] creating virtualenv at $ENV_PREFIX"
+    BASE_PY="${BASE_PYTHON:-python$PY_VERSION}"
+    if ! command -v "$BASE_PY" >/dev/null 2>&1; then
+        BASE_PY="$(command -v python3 || true)"
+    fi
+    if [ -z "$BASE_PY" ]; then
+        echo "ERROR: no python3 on PATH; install python$PY_VERSION first" >&2
+        exit 1
+    fi
+    echo "      base interpreter: $BASE_PY ($("$BASE_PY" -V 2>&1))"
+    "$BASE_PY" -m venv "$ENV_PREFIX"
 fi
 
 "$PY" -m pip install --upgrade pip wheel setuptools
 
-# --- 2. CUDA toolkit (nvcc) for the pointops extension ---------------------
+# --- 2. provide nvcc for the pointops extension ----------------------------
+NVCC=""
 if [ "$SKIP_TOOLKIT" = "1" ]; then
-    echo "[2/7] skipping CUDA toolkit install (SKIP_TOOLKIT=1)"
-else
-    echo "[2/7] installing CUDA toolkit 12.8 (nvcc) from the nvidia channel"
+    echo "[2/7] skipping nvcc provisioning (SKIP_TOOLKIT=1)"
+elif [ -x "$ENV_PREFIX/bin/nvcc" ]; then
+    echo "[2/7] nvcc already present in the environment"
+    NVCC="$ENV_PREFIX/bin/nvcc"
+elif command -v nvcc >/dev/null 2>&1; then
+    echo "[2/7] using the system nvcc: $(command -v nvcc)"
+    NVCC="$(command -v nvcc)"
+elif [ "$ENV_KIND" = "conda" ]; then
+    echo "[2/7] installing CUDA toolkit 12.8 through conda"
     conda install -y -p "$ENV_PREFIX" -c nvidia cuda-toolkit=12.8
+else
+    echo "[2/7] installing $NVCC_WHEEL (nvcc via pip, no conda needed)"
+    "$PY" -m pip install --progress-bar off "$NVCC_WHEEL"
 fi
 if [ -x "$ENV_PREFIX/bin/nvcc" ]; then
     NVCC="$ENV_PREFIX/bin/nvcc"
-else
+elif [ -z "$NVCC" ] && [ -x "$ENV_PREFIX/Library/bin/nvcc" ]; then
     NVCC="$ENV_PREFIX/Library/bin/nvcc"   # windows layout, harmless on linux
 fi
-echo "      nvcc: $("$NVCC" --version 2>/dev/null | tail -1 || echo 'NOT FOUND')"
+if [ -n "$NVCC" ]; then
+    echo "      nvcc: $("$NVCC" --version 2>/dev/null | tail -1 || echo 'NOT FOUND')"
+fi
 
 # gcc must be within the range CUDA 12.8 supports (<= 13)
 if command -v gcc >/dev/null 2>&1; then
@@ -112,8 +145,17 @@ fi
 
 # --- 6. pointops (kNN / ball query / FPS / stratified CRPE attention) ------
 echo "[6/7] building the pointops CUDA extension (this takes a while)"
-export CUDA_HOME="$(dirname "$(dirname "$NVCC")")"
+# For a pip-installed nvcc the CUDA headers land in <env>/include (or under
+# nvidia/cuda_nvcc/include), for a toolkit install they live next to bin/.
+if [ -z "$CUDA_HOME" ]; then
+    if [ -f "$ENV_PREFIX/include/cuda_runtime.h" ]; then
+        CUDA_HOME="$ENV_PREFIX"
+    else
+        CUDA_HOME="$(dirname "$(dirname "$NVCC")")"
+    fi
+fi
 export CUDA_PATH="$CUDA_HOME"
+export CPATH="$CUDA_HOME/include:${CPATH:-}"
 export TORCH_CUDA_ARCH_LIST
 export PATH="$CUDA_HOME/bin:$ENV_PREFIX/bin:$PATH"
 echo "      CUDA_HOME=$CUDA_HOME"
