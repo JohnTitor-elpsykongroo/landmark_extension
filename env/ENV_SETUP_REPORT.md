@@ -14,6 +14,17 @@ CUDA toolkit or from the `nvidia-cuda-nvcc-cu12` pip package instead. On the
 Linux deployment target `env/setup_linux.sh` therefore defaults to
 `ENV_KIND=venv`; conda is opt-in there.
 
+**Note on the CUDA version:** this machine first used CUDA 12.8 (then the minimum
+for sm_120) and later 13.0. The `CUDA Version` printed by `nvidia-smi` is the
+driver's *maximum*, not a requirement - CUDA is minor-version backward
+compatible, so a cu128 runtime runs on a 13.x driver. The Windows machine was
+verified with torch 2.11.0+cu128 against a 13.2 driver; the Linux target defaults
+to `CUDA_VER=13.0` because torch 2.11.0+cu130, PyG's
+`torch_scatter 2.1.2+pt211cu130` and conda's `cuda-toolkit=13.0` all exist.
+Note that CUDA 13 has no usable pip nvcc wheel, so on the 13.0 path nvcc must come
+from a system toolkit or conda. The gcc ceiling is <= 14 for CUDA 13.0 and <= 13
+for 12.8.
+
 ## 1. Final state
 
 | Component | Version / state |

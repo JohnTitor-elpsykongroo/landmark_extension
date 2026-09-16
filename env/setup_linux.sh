@@ -19,8 +19,14 @@
 # Usage:
 #   ENV_KIND=venv    bash landmark_extension/env/setup_linux.sh   # default: plain .venv
 #   ENV_KIND=conda   bash landmark_extension/env/setup_linux.sh   # conda env instead
-#   CUDA_INDEX=https://download.pytorch.org/whl/cu130 bash .../setup_linux.sh
+#   CUDA_VER=12.8    bash landmark_extension/env/setup_linux.sh   # older toolkit instead
 #   SKIP_TOOLKIT=1 bash .../setup_linux.sh    # nvcc already on PATH / in the env
+#
+# On the CUDA version: the driver's "CUDA Version" (13.0 via nvidia-smi) is the
+# *maximum* the driver supports, not a requirement - CUDA is minor-version
+# backward compatible, so a cu128 or cu130 wheel both run on it. This script
+# therefore targets the toolkit that actually exists for your driver: 13.0 by
+# default, 12.8 as a documented fallback.
 # ---------------------------------------------------------------------------
 
 set -euo pipefail
@@ -28,9 +34,24 @@ set -euo pipefail
 ENV_KIND="${ENV_KIND:-venv}"
 ENV_PREFIX="${ENV_PREFIX:-$HOME/envs/3dteethland}"
 PY_VERSION="${PY_VERSION:-3.10}"
-CUDA_INDEX="${CUDA_INDEX:-https://download.pytorch.org/whl/cu128}"
-NVCC_WHEEL="${NVCC_WHEEL:-nvidia-cuda-nvcc-cu12==12.8.93}"
-PYG_CUDA="${PYG_CUDA:-cu128}"
+
+# CUDA_VER drives every CUDA-version-dependent default (torch wheel index, PyG
+# wheel suffix, conda toolkit version) and can be overridden to 12.8.
+CUDA_VER="${CUDA_VER:-13.0}"
+CUDA_VER_TAG="${CUDA_VER//./}"          # 13.0 -> 130 (no external commands needed)
+DEFAULT_CUDA_TAG="cu${CUDA_VER_TAG}"    # -> cu130
+
+CUDA_INDEX="${CUDA_INDEX:-https://download.pytorch.org/whl/${DEFAULT_CUDA_TAG}}"
+PYG_CUDA="${PYG_CUDA:-${DEFAULT_CUDA_TAG}}"
+CONDA_CUDA_TOOLKIT="${CONDA_CUDA_TOOLKIT:-cuda-toolkit=${CUDA_VER}}"
+# NOTE: there is no usable pip wheel for CUDA 13 nvcc (PyPI's
+# nvidia-cuda-nvcc-cu13 only has a 0.0.1 placeholder), so the pip fallback is
+# only offered for 12.x.
+if [ "$CUDA_VER" = "12.8" ]; then
+    NVCC_WHEEL="${NVCC_WHEEL:-nvidia-cuda-nvcc-cu12==12.8.93}"
+else
+    NVCC_WHEEL="${NVCC_WHEEL:-}"
+fi
 TORCH_CUDA_ARCH_LIST="${TORCH_CUDA_ARCH_LIST:-12.0}"   # sm_120 = RTX 5090
 SKIP_TOOLKIT="${SKIP_TOOLKIT:-0}"
 
@@ -42,6 +63,7 @@ echo " 3dteethland landmark environment"
 echo "   repo        : $REPO_ROOT"
 echo "   env kind    : $ENV_KIND"
 echo "   env prefix  : $ENV_PREFIX"
+echo "   CUDA target : $CUDA_VER  (${DEFAULT_CUDA_TAG})"
 echo "   torch index : $CUDA_INDEX"
 echo "   arch list   : $TORCH_CUDA_ARCH_LIST"
 echo "==================================================================="
@@ -86,11 +108,18 @@ elif command -v nvcc >/dev/null 2>&1; then
     echo "[2/7] using the system nvcc: $(command -v nvcc)"
     NVCC="$(command -v nvcc)"
 elif [ "$ENV_KIND" = "conda" ]; then
-    echo "[2/7] installing CUDA toolkit 12.8 through conda"
-    conda install -y -p "$ENV_PREFIX" -c nvidia cuda-toolkit=12.8
-else
+    echo "[2/7] installing $CONDA_CUDA_TOOLKIT through conda"
+    conda install -y -p "$ENV_PREFIX" -c nvidia "$CONDA_CUDA_TOOLKIT"
+elif [ -n "$NVCC_WHEEL" ]; then
     echo "[2/7] installing $NVCC_WHEEL (nvcc via pip, no conda needed)"
     "$PY" -m pip install --progress-bar off "$NVCC_WHEEL"
+else
+    echo "ERROR: no nvcc found and no pip wheel available for CUDA $CUDA_VER." >&2
+    echo "       Do one of:" >&2
+    echo "         * install a system CUDA toolkit ($CUDA_VER)" >&2
+    echo "         * re-run with ENV_KIND=conda (installs $CONDA_CUDA_TOOLKIT)" >&2
+    echo "         * re-run with CUDA_VER=12.8 (has a pip nvcc wheel)" >&2
+    exit 1
 fi
 if [ -x "$ENV_PREFIX/bin/nvcc" ]; then
     NVCC="$ENV_PREFIX/bin/nvcc"
@@ -138,8 +167,8 @@ fi
 # pointops needs a working host CUDA compiler; fail early with a clear message
 if [ ! -x "$NVCC" ]; then
     echo "ERROR: nvcc not found at $NVCC." >&2
-    echo "       Install a CUDA toolkit (conda -c nvidia cuda-toolkit=12.8) or" >&2
-    echo "       re-run with SKIP_TOOLKIT=1 only if nvcc really is on PATH." >&2
+    echo "       Install a CUDA toolkit (ENV_KIND=conda -> $CONDA_CUDA_TOOLKIT)" >&2
+    echo "       or re-run with SKIP_TOOLKIT=1 only if nvcc really is on PATH." >&2
     exit 1
 fi
 

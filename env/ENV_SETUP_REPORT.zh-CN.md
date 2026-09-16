@@ -28,6 +28,18 @@
 | MSVC | 14.51.36231（Visual Studio 18 BuildTools）—— **目前没有任何 CUDA 工具链支持它** |
 | `pointops` | **未编译成功** —— 见第 5 节 |
 
+**关于 CUDA 版本**：Windows 开发机先用 CUDA 12.8（因为它当时是 sm_120 所需的最低版本），
+后来换成 13.0。这两件事不要混淆：
+
+* `nvidia-smi` 报告的 `CUDA Version` 是驱动支持的**上限**，不是要求。CUDA 小版本向后兼容，
+  所以 12.x 的运行时能在 13.x 驱动上跑，反之不行。
+* 本机（驱动 596.58 报 13.2）用 torch 2.11.0+**cu128** 跑通了真实 CUDA 运算；目标机（驱动报
+  13.0）默认改用 **cu130**（`CUDA_VER=13.0`），因为 torch 2.11.0+cu130、PyG 的
+  `torch_scatter 2.1.2+pt211cu130`、conda 的 `cuda-toolkit=13.0` 三者都齐。
+* **CUDA 13 没有可用的 pip 版 nvcc**（PyPI 的 `nvidia-cuda-nvcc-cu13` 只是 `0.0.1` 占位包），
+  所以 13.0 路径下的 nvcc 只能来自系统 toolkit 或 conda；pip nvcc 回退只在 `CUDA_VER=12.8` 生效。
+* gcc 上限随 CUDA 版本变：CUDA 13.0 允许 gcc ≤ 14，CUDA 12.8 允许 ≤ 13。
+
 ## 2. 与原仓库声明环境的差异
 
 README 要求 `conda create -n 3dteethland python=3.10` + `pip install -r requirements.txt` +
