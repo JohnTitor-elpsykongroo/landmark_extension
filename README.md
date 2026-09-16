@@ -47,18 +47,34 @@ bash landmark_extension/env/setup_linux.sh
 
 | Variable | Default | Meaning |
 | --- | --- | --- |
+| `ENV_KIND` | `venv` | `venv` (default, i.e. `python -m venv`) or `conda` |
 | `ENV_PREFIX` | `$HOME/envs/3dteethland` | where the environment is created |
 | `CUDA_INDEX` | `https://download.pytorch.org/whl/cu128` | torch wheel index |
+| `NVCC_WHEEL` | `nvidia-cuda-nvcc-cu12==12.8.93` | pip package used when nvcc comes from pip |
 | `PYG_CUDA` | `cu128` | torch-scatter wheel suffix, must match torch |
 | `TORCH_CUDA_ARCH_LIST` | `12.0` | RTX 5090 is sm_120 |
-| `SKIP_TOOLKIT` | `0` | set to `1` when a CUDA toolkit is already present |
+| `SKIP_TOOLKIT` | `0` | set to `1` when nvcc is already on PATH / in the env |
 
-The script creates the env, installs a CUDA 12.8 toolkit (for `nvcc`), installs
-cu128 torch, installs the project requirements plus the undeclared
-`scikit-learn` / `pandas` / `scikit-multilearn` imports, installs
-`torch-scatter` (prebuilt wheel, falling back to a source build), builds
-`pointops` in place, and finishes with a self-check that runs a real CUDA matmul
-and a real `pointops.farthestPointSampling` call.
+The script creates the env (`python -m venv` by default), provisions `nvcc`
+(auto-detected in this order: already in the env -> on PATH -> conda toolkit ->
+`pip install nvidia-cuda-nvcc-cu12`), installs cu128 torch, installs the project
+requirements plus the undeclared `scikit-learn` / `pandas` / `scikit-multilearn`
+imports, installs `torch-scatter` (prebuilt wheel, falling back to a source
+build), builds `pointops` in place, and finishes with a self-check that runs a
+real CUDA matmul and a real `pointops.farthestPointSampling` call.
+
+**conda is not required.** The repository imports only pip packages, so a plain
+`python -m venv` is enough; the script defaults to `ENV_KIND=venv`. conda was
+only ever a convenient supplier of `nvcc`, and pip can supply that too:
+
+| Situation | What happens |
+| --- | --- |
+| system CUDA toolkit present | used directly, conda never involved |
+| no toolkit | `NVCC_WHEEL` (default `nvidia-cuda-nvcc-cu12==12.8.93`, which also ships `cuda_runtime.h` and friends) is pip-installed into the venv |
+| you prefer conda | `ENV_KIND=conda` |
+
+`nvcc` is needed for exactly one thing - compiling the `pointops` CUDA
+extension. Everything else is plain pip.
 
 `configs/landmark_<jaw>.yaml` is already tuned for the 5090
 (`batch_size: 32`, `num_workers: 8`; the repository baseline is 8 / 4), and the
@@ -527,115 +543,150 @@ either torch 2.8.0+cu128 (available for Python 3.10) or patching
 
 This section assumes you have exactly three things: the original **3dteethland**
 repository, this **`landmark_extension/`** folder, and the raw **Teeth3DS+**
-dataset. Every command below is copy-pasteable. Adjust the three variables to
-your machine; the values used while developing this were
-`ENV_PREFIX=$HOME/envs/3dteethland`, `DATA_ROOT=/data/Teeth3DS`,
-`REPO=/path/to/3dteethland`.
+dataset.
 
-### Step 0 - preconditions
+**Two tracks - pick one and follow it to the end:**
 
-```bash
-nvidia-smi                          # expect the RTX 5090 + the CUDA version the driver reports
-conda --version                     # or mamba
-gcc -dumpfullversion -dumpversion   # CUDA 12.8 requires gcc <= 13
-```
+| | Track | Needs conda? |
+| --- | --- | --- |
+| **A** | `python -m venv` + plain pip (**recommended**, section 7.A) | No, not once |
+| **B** | a conda environment (section 7.B) | Yes |
 
-No `nvcc` yet is fine - step 4 installs it.
+The repository has **no conda dependency at all**: it imports only pip packages,
+and `setup.py` needs only `setuptools` + `torch.utils.cpp_extension`. The single
+thing conda can help with is supplying `nvcc`, and that is equally available from
+a system CUDA toolkit or from `pip install nvidia-cuda-nvcc-cu12`. `nvcc` is
+needed for one purpose only: compiling the `pointops` CUDA extension.
 
-### Step 1 - get the repository and drop `landmark_extension` into it
+### 7.A Track A: venv + pip (complete flow, no conda)
+
+#### A-1 Prerequisites: clone the project and drop `landmark_extension` in
 
 ```bash
 git clone https://github.com/nnistelrooij/3dteethland.git
 cd 3dteethland
 
-# place landmark_extension next to teethland/, train.py and setup.py
+# put this folder at the repository root (next to teethland/, train.py, setup.py);
+# the location matters for run_landmark.py and the fold paths in configs/
 cp -r /path/to/landmark_extension ./landmark_extension
-# or, if you keep it as its own repo:
-# git clone <landmark_extension-url> landmark_extension
+# or: git clone https://github.com/JohnTitor-elpsykongroo/landmark_extension landmark_extension
 
-ls landmark_extension/README.md landmark_extension/configs/landmark_upper.yaml
+# dataset: copy Teeth3DS+ to the target machine and remember the path (used in A10)
+export DATA_ROOT=/data/Teeth3DS
+ls "$DATA_ROOT"                                  # upper/ lower/ 3DTeethLand_landmarks_train/ ...
+ls -d "$DATA_ROOT"/upper/*/     | wc -l          # 950
+ls -d "$DATA_ROOT"/lower/*/     | wc -l          # 950
+ls -d "$DATA_ROOT"/3DTeethLand_landmarks_train/upper/*/ | wc -l   # 120
+ls -d "$DATA_ROOT"/3DTeethLand_landmarks_train/lower/*/ | wc -l   # 120
 ```
 
-The location matters: `run_landmark.py` and the `fold` paths in
-`configs/*.yaml` are resolved assuming `landmark_extension/` sits at the
-repository root.
+Each case directory must contain both `<case>_<jaw>.obj` (mesh) and
+`<case>_<jaw>.json` (per-vertex FDI); each landmark directory must contain
+`<case>_<jaw>__kpt.json`.
 
-### Step 2 - stage the dataset and check the layout
+#### A0 Preconditions
 
 ```bash
-export DATA_ROOT=/data/Teeth3DS      # change to your path
-ls "$DATA_ROOT"                      # upper/ lower/ 3DTeethLand_landmarks_train/ ...
-ls "$DATA_ROOT/upper" | head         # one directory per case
-ls "$DATA_ROOT/upper/01328DDN"       # 01328DDN_upper.obj + 01328DDN_upper.json
-ls "$DATA_ROOT/3DTeethLand_landmarks_train/upper" | head
-ls "$DATA_ROOT/3DTeethLand_landmarks_train/upper/013TXGFK"   # 013TXGFK_upper__kpt.json
-
-# expected counts: 950 / 950 / 120 / 120
-ls -d "$DATA_ROOT"/upper/*/     | wc -l
-ls -d "$DATA_ROOT"/lower/*/     | wc -l
-ls -d "$DATA_ROOT"/3DTeethLand_landmarks_train/upper/*/ | wc -l
-ls -d "$DATA_ROOT"/3DTeethLand_landmarks_train/lower/*/ | wc -l
+nvidia-smi                          # expect the RTX 5090 + the CUDA version the driver reports
+python3.10 -V                       # needed to create the venv
+gcc -dumpfullversion -dumpversion   # CUDA 12.8 requires gcc <= 13
 ```
 
-### Step 3 - create the environment
+If there is no `python3.10` (only newer), install it via pyenv/apt, or set
+`PY_VERSION=3.12` and, in A5, use a torch version that has `cp312` wheels.
+
+#### A1 Create the venv and upgrade the packaging tools
 
 ```bash
-export ENV_PREFIX=$HOME/envs/3dteethland
-conda create -y -p "$ENV_PREFIX" python=3.10
-export PY="$ENV_PREFIX/bin/python"
-"$PY" -m pip install --upgrade pip wheel setuptools
+export REPO=/path/to/3dteethland
+export VENV=$REPO/.venv
+export PY="$VENV/bin/python"
+
+python3.10 -m venv "$VENV"
+"$PY" -m pip install -U pip wheel setuptools
+"$PY" -V && "$PY" -m pip -V
 ```
 
-### Step 4 - install a CUDA toolkit that provides `nvcc`
-
-```bash
-conda install -y -p "$ENV_PREFIX" -c nvidia cuda-toolkit=12.8
-export CUDA_HOME="$ENV_PREFIX"
-export CUDA_PATH="$CUDA_HOME"
-"$ENV_PREFIX/bin/nvcc" --version
-```
-
-### Step 5 - install torch with sm_120 support
+#### A2 Install torch (must support sm_120; also sets up the CUDA state for A9)
 
 ```bash
 "$PY" -m pip install torch torchvision torchaudio \
     --index-url https://download.pytorch.org/whl/cu128
+
 "$PY" -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
+# expect: 2.11.0+cu128 12.8 True
 ```
 
-Expect something like `2.11.0+cu128 12.8 True`. Do **not** install
-`torch==2.3.0` from `requirements.txt`; it has no sm_120 support.
+`cu128` is what carries sm_120 support. Do **not** install the `torch==2.3.0`
+pinned in `requirements.txt`, and do not infer the wheel suffix from the driver
+version reported by nvidia-smi: the cu128 wheel runs fine on a 13.x driver (that
+is exactly how the Windows development machine was verified).
 
-### Step 6 - install the remaining requirements by hand
-
-`requirements.txt` mixes the torch packages (handled above) with plain
-dependencies, so install the equivalent set directly:
+#### A3 Install the requirements except the torch packages
 
 ```bash
 "$PY" -m pip install "numpy<2.0.0" lxml==5.2.2 opencv-python==4.10.0.84 \
     open3d==0.17.0 gco-wrapper==3.0.9 pymeshlab==2023.12.post1 pytest==8.2.2 \
     pytorch-lightning==2.3.3 tensorboard==2.17.0 timm==1.0.7 torchtyping==0.1.4
-
-# imported by the repo but missing from requirements.txt
-"$PY" -m pip install scikit-learn pandas scikit-multilearn
-
-# must match your torch version and CUDA suffix exactly
-"$PY" -m pip install torch-scatter \
-    -f https://data.pyg.org/whl/torch-2.11.0+cu128.html
 ```
 
-If step 5 gave you a different torch version, change the `2.11.0` in that URL
-(check with `"$PY" -c "import torch; print(torch.__version__)"`). If no wheel
-exists there, build from source:
-`"$PY" -m pip install --no-build-isolation torch-scatter`.
+(Equivalent to `requirements.txt` minus the torch packages and torch-scatter.)
 
-### Step 7 - build the pointops CUDA extension
+#### A4 Add the packages the repo imports but never declares
 
 ```bash
-cd /path/to/3dteethland
-export TORCH_CUDA_ARCH_LIST=12.0        # RTX 5090 = sm_120
-export PATH="$CUDA_HOME/bin:$ENV_PREFIX/bin:$PATH"
-"$PY" setup.py build_ext --inplace      # fallback: "$PY" -m pip install -v -e .
+"$PY" -m pip install scikit-learn pandas scikit-multilearn
+```
+
+These are genuine gaps: `teethland/tensor.py` and
+`teethland/data/transforms.py` import `sklearn`, the 3DTeethLand evaluation path
+uses `pandas`, and the fold split uses
+`skmultilearn.model_selection.IterativeStratification`.
+
+#### A5 Install torch-scatter (must match torch and the CUDA suffix exactly)
+
+```bash
+"$PY" -m pip install torch-scatter \
+    -f https://data.pyg.org/whl/torch-2.11.0+cu128.html
+
+"$PY" -c "import torch_scatter; print('torch_scatter', torch_scatter.__version__)"
+```
+
+If A2 gave you a different torch version, replace `2.11.0` with the output of
+`"$PY" -c "import torch; print(torch.__version__.split('+')[0])"`. If the index
+has no matching wheel, build from source:
+`"$PY" -m pip install --no-build-isolation torch-scatter`.
+
+#### A6 Provide `nvcc` (only `pointops` needs it)
+
+Pick one:
+
+```bash
+# (a) a system CUDA toolkit is already installed
+which nvcc && export CUDA_HOME="$(dirname "$(dirname "$(which nvcc)")")"
+
+# (b) no toolkit: get nvcc from pip - still no conda
+"$PY" -m pip install nvidia-cuda-nvcc-cu12==12.8.93
+export CUDA_HOME="$VENV"        # this package ships nvcc and cuda_runtime.h inside the venv
+
+export CUDA_PATH="$CUDA_HOME"
+export CPATH="$CUDA_HOME/include:${CPATH:-}"
+echo "CUDA_HOME=$CUDA_HOME"
+"$CUDA_HOME/bin/nvcc" --version
+```
+
+gcc must be <= 13 for CUDA 12.8 (`gcc --version`); if the system gcc is newer,
+either `export CC=gcc-12 CXX=g++-12` or install a CUDA 13 toolkit and adjust
+`CUDA_HOME` / `TORCH_CUDA_ARCH_LIST`.
+
+#### A7 Build the pointops CUDA extension
+
+```bash
+export TORCH_CUDA_ARCH_LIST=12.0          # RTX 5090 = sm_120
+export PATH="$CUDA_HOME/bin:$VENV/bin:$PATH"
+
+cd "$REPO"
+"$PY" setup.py build_ext --inplace        # fallback: "$PY" -m pip install -v -e .
 
 # must pass, otherwise training dies on the first kNN / sampling call
 "$PY" -c "
@@ -647,7 +698,41 @@ print('fps ok:', tuple(idx.shape), idx.dtype)
 "
 ```
 
-### Step 8 - repoint the three paths in the configs
+#### A8 One-shot verification of the finished environment
+
+```bash
+"$PY" - <<'EOF'
+import importlib, torch
+for m in ["torch","torchvision","pytorch_lightning","torchmetrics","open3d",
+          "pymeshlab","cv2","timm","gco","lxml","sklearn","skmultilearn",
+          "torchtyping","torch_scatter","pointops"]:
+    try:
+        importlib.import_module(m); print(f" OK   {m}")
+    except Exception as e:
+        print(f" FAIL {m}: {type(e).__name__}: {e}")
+print("cuda:", torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else "")
+EOF
+```
+
+#### A9 (optional) Install the CUDA runtime libraries into the venv
+
+Only needed when the system has no CUDA runtime at all and A8 reports a missing
+`libcudart.so`. It makes torch independent of the system CUDA, and on a small
+laptop GPU (the 8 GB RTX 5050 this was developed on) it also avoids
+`Cannot re-initialize CUDA in forked subprocess`: a multiprocessing dataloader
+forks with the already-initialised CUDA state, so importing the CUDA wheels first
+initialises it before the workers are created.
+
+```bash
+"$PY" -m pip install nvidia-cuda-nvrtc-cu12 nvidia-cuda-runtime-cu12 nvidia-cuda-cupti-cu12 nvidia-cudnn-cu12
+"$PY" -m pip install --no-deps --force-reinstall torch
+# --no-deps is required: torch's declared dependency set is incompatible with the nvidia pip wheels
+"$PY" -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+```
+
+Not part of the required flow; training works without it.
+
+#### A10 Repoint the three paths in the configs
 
 In `landmark_extension/configs/landmark_upper.yaml` and `landmark_lower.yaml`:
 
@@ -658,34 +743,37 @@ datamodule:
   fold: 'landmark_extension/prepare/landmark_upper_fold_0.txt'        # lower.yaml uses lower
 ```
 
-`fold` may stay relative (it resolves against the repository root). To
-regenerate the folds for a different data root, pass `--data-root` explicitly -
-the script default is the Windows path:
+`fold` may stay relative (resolved against the repository root). To regenerate
+the folds for a different data root, pass `--data-root` explicitly - the script
+default is the Windows path:
 
 ```bash
 "$PY" landmark_extension/prepare/prepare_landmark_training_data.py --data-root /data/Teeth3DS
 ```
 
-### Step 9 - validate the data path (no training)
+#### A11 Validate the data path (no training)
 
 ```bash
-cd /path/to/3dteethland
+cd "$REPO"
 "$PY" landmark_extension/validation/check_data_adapter.py --jaw upper --cases 3
 "$PY" landmark_extension/validation/smoke_test_landmark_pipeline.py --jaw upper --batch-size 32
 ```
 
-The second one runs dataset -> collate -> forward -> loss -> backward once and
-writes `peak_memory_gb` into `landmark_extension/validation/smoke_report.json`.
-If it does not fit, lower `--batch-size` and update `batch_size` in the config.
+The second command runs dataset -> collate -> forward -> loss -> backward once
+and writes `peak_memory_gb` into
+`landmark_extension/validation/smoke_report.json`. If it does not fit, lower
+`--batch-size` and update `batch_size` in the config.
 
-### Step 10 - start training
+#### A12 Start training
 
 ```bash
-cd /path/to/3dteethland
+cd "$REPO"
 
+# upper jaw
 "$PY" landmark_extension/run_landmark.py \
     --config landmark_extension/configs/landmark_upper.yaml --devices 1
 
+# lower jaw (separate process/task; a data module holds one jaw only)
 "$PY" landmark_extension/run_landmark.py \
     --config landmark_extension/configs/landmark_lower.yaml --devices 1
 ```
@@ -702,7 +790,7 @@ Outputs:
   working directory**, so always start from the repository root. Deleting it is
   safe - it just re-preprocesses.
 
-### Step 11 (optional) - inference and scoring
+#### A13 (optional) Inference and scoring
 
 ```bash
 "$PY" landmark_extension/infer/predict_landmarks.py \
@@ -716,21 +804,62 @@ Outputs:
     --out         landmark_extension/eval/scores_upper_fold_0.json
 ```
 
-### 7.1 How the manual steps map onto `setup_linux.sh`
+### 7.B Track B: conda environment (alternative)
 
-| Manual step | Stage in `setup_linux.sh` |
+Replace A1 with the conda environment creation and A6(a/b) with installing the
+toolkit into the env; A2-A5 and A7-A13 are identical:
+
+```bash
+export ENV_PREFIX=$HOME/envs/3dteethland
+conda create -y -p "$ENV_PREFIX" python=3.10
+export PY="$ENV_PREFIX/bin/python"
+"$PY" -m pip install -U pip wheel setuptools
+
+conda install -y -p "$ENV_PREFIX" -c nvidia cuda-toolkit=12.8
+export CUDA_HOME="$ENV_PREFIX"
+export CUDA_PATH="$CUDA_HOME"
+export CPATH="$CUDA_HOME/include:${CPATH:-}"
+"$CUDA_HOME/bin/nvcc" --version
+```
+
+Because the conda env already provides `nvcc`, A6 can be skipped entirely.
+
+### 7.C The two tracks side by side
+
+| Step | Track A (venv) | Track B (conda) |
+| --- | --- | --- |
+| prerequisite | `python3.10` on the system | conda/mamba on the system |
+| create env | `python3.10 -m venv $VENV` | `conda create -p $ENV_PREFIX python=3.10` |
+| interpreter path | `$VENV/bin/python` | `$ENV_PREFIX/bin/python` |
+| nvcc source | system toolkit, or `pip install nvidia-cuda-nvcc-cu12` | `conda install -c nvidia cuda-toolkit=12.8` |
+| `CUDA_HOME` | `$VENV` (pip wheel) or the system CUDA root | `$ENV_PREFIX` |
+| torch / dependency install | identical pip commands | identical pip commands |
+| disk footprint | smaller (only a subset of CUDA runtime) | larger (full toolkit) |
+| matches `setup_linux.sh` | `ENV_KIND=venv` (default) | `ENV_KIND=conda` |
+
+Both tracks produce functionally equivalent Python environments: `pointops` is
+built from the same `setup.py`, and the training scripts, configs, validation and
+evaluation commands are identical.
+
+### 7.D How the manual steps map onto `setup_linux.sh`
+
+| Manual step (track A) | Stage in `setup_linux.sh` |
 | --- | --- |
-| step 3 env | `[1/7]` |
-| step 4 CUDA toolkit | `[2/7]` |
-| step 5 torch | `[3/7]` |
-| step 6 other deps | `[4/7]` + `[5/7]` |
-| step 7 pointops build | `[6/7]` |
-| step 7 self-check | `[7/7]` |
-| steps 1, 2, 8-11 | not covered by the script - always manual |
+| A1 create the venv | `[1/7]` |
+| A6 provide nvcc | `[2/7]` |
+| A2 install torch | `[3/7]` |
+| A3 + A4 other dependencies | `[4/7]` + `[5/7]` |
+| A7 build pointops | `[6/7]` |
+| A8 verification | `[7/7]` |
+| A5 torch-scatter | inside `[5/7]` |
+| A9 CUDA runtime wheels (optional) | not covered |
+| A-1 clone + dataset check | not covered |
+| A10-A13 config / validate / train / evaluate | not covered - always manual |
 
-In other words the script only covers the *environment*; placing the project,
-pointing at the data, validating and the training command are manual either way.
-
+The script is equivalent to
+`ENV_KIND=venv ENV_PREFIX=<venv> bash landmark_extension/env/setup_linux.sh`; it
+covers only the *environment* (A1-A8). Placing the project, pointing at the data,
+validating, training and evaluating are manual either way.
 ## 8. Environment record (Windows development machine)
 
 ### 8.1 The one remaining blocker (two options)

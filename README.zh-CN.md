@@ -12,8 +12,9 @@
 （中文版 [`env/ENV_SETUP_REPORT.zh-CN.md`](env/ENV_SETUP_REPORT.zh-CN.md)）
 
 想**手动用命令行搭建**（不使用 `env/setup_linux.sh`）？直接看第 7 节：
-从拉取项目、放 `landmark_extension`、核对数据集、建环境、装依赖、编译 pointops，
-到改配置、跑验证、启动训练，全部是可复制的命令。
+第 7.A 节是 **venv + pip 的完整流程**（不需要 conda）：从拉取项目、放 `landmark_extension`、
+核对数据集、建 venv、装依赖、准备 nvcc、编译 pointops，到改配置、跑验证、启动训练与评测，
+全部是可复制的命令；第 7.B 节是等价的 conda 备选路径。
 
 ### 本目录是一个独立 git 仓库
 
@@ -90,17 +91,31 @@ bash landmark_extension/env/setup_linux.sh
 
 | 变量 | 默认值 | 说明 |
 | --- | --- | --- |
+| `ENV_KIND` | `venv` | `venv`（默认，等价于 `python -m venv`）或 `conda` |
 | `ENV_PREFIX` | `$HOME/envs/3dteethland` | 环境安装位置 |
 | `CUDA_INDEX` | `https://download.pytorch.org/whl/cu128` | torch 下载源 |
+| `NVCC_WHEEL` | `nvidia-cuda-nvcc-cu12==12.8.93` | 只用 pip 提供 nvcc 时的包 |
 | `PYG_CUDA` | `cu128` | torch-scatter wheel 的 CUDA 后缀，需与 torch 匹配 |
 | `TORCH_CUDA_ARCH_LIST` | `12.0` | RTX 5090 为 sm_120 |
-| `SKIP_TOOLKIT` | `0` | 设为 `1` 表示机器上已有 CUDA toolkit |
+| `SKIP_TOOLKIT` | `0` | 设为 `1` 表示 nvcc 已在 PATH 或环境内，跳过自动获取 |
 
-脚本流程：创建 env → 从 nvidia 频道装 CUDA 12.8 toolkit（提供 `nvcc`）→ 装 cu128 版
-torch 三件套 → 装 requirements 其余依赖 + 仓库漏声明的 `scikit-learn`/`pandas`/
-`scikit-multilearn` → 装 torch-scatter（先试 PyG 预编译 wheel，失败则源码编译）→
-`setup.py build_ext --inplace` 编译 `pointops` → 最后自动做一轮验证（含真实 CUDA matmul、
-显存总量、以及一次真实的 `pointops.farthestPointSampling` 调用）。
+脚本流程：创建环境（默认 `python -m venv`）→ 准备 `nvcc`（按「环境内已有 → 系统 PATH →
+conda toolkit → pip 装 `nvidia-cuda-nvcc-cu12`」的顺序自动判断）→ 装 cu128 版 torch 三件套
+→ 装 requirements 其余依赖 + 仓库漏声明的 `scikit-learn`/`pandas`/`scikit-multilearn` →
+装 torch-scatter（先试 PyG 预编译 wheel，失败则源码编译）→ `setup.py build_ext --inplace`
+编译 `pointops` → 最后自动做一轮验证（含真实 CUDA matmul、显存总量、以及一次真实的
+`pointops.farthestPointSampling` 调用）。
+
+**关于 conda：不是必需的。** 仓库只 import pip 包，`python -m venv` 完全够用。
+脚本默认就是 `ENV_KIND=venv`（建 `.venv` 式环境），conda 只是"提供 nvcc"的一种便利方式，
+而且这个角色现在也可以由 pip 承担：
+
+* 机器上已有系统 CUDA toolkit → 直接用，完全不碰 conda；
+* 没有 → 脚本自动 `pip install nvidia-cuda-nvcc-cu12==12.8.93`（PyPI 上就有，自带
+  `cuda_runtime.h` 等头文件），依然不需要 conda；
+* 你确实想用 conda → `ENV_KIND=conda`。
+
+只有 `pointops` 这个 CUDA 扩展需要 nvcc，其余全部是纯 pip 依赖。
 
 关于 torch 版本选择：你的驱动支持 CUDA 13.0，**cu128 wheel 在 13.x 驱动上可以直接运行**
 （本机就是用 cu128 wheel 配 13.2 驱动跑通的）。如果想用更新的构建，可以
@@ -158,127 +173,145 @@ python landmark_extension/validation/smoke_test_landmark_pipeline.py --jaw upper
 本机验证过的默认值是 `ENV_PREFIX=$HOME/envs/3dteethland`、`DATA_ROOT=/data/Teeth3DS`、
 `REPO=/path/to/3dteethland`。
 
-### 步骤 0　前置确认
+**两条路径，选一条走到底即可：**
 
-```bash
-nvidia-smi                      # 期望看到 RTX 5090，以及驱动报告的 CUDA 版本
-conda --version                 # 或 mamba
-gcc -dumpfullversion -dumpversion   # CUDA 12.8 要求 gcc <= 13
-```
+| | 路径 | 需要 conda 吗 |
+| --- | --- | --- |
+| **A** | `python -m venv` + 纯 pip（**推荐**，第 7.A 节） | 不需要，一步都不用 |
+| **B** | conda 环境（第 7.B 节） | 需要 |
 
-如果机器上没有 `nvcc` 也没关系，第 2 步会装它。
+仓库本身**没有任何 conda 依赖**：它只 import pip 包，`setup.py` 只依赖
+`setuptools` + `torch.utils.cpp_extension`。conda 唯一可能有用武之地的地方是"顺手提供
+`nvcc`"，而这件事系统 apt 装 CUDA toolkit、或者 `pip install nvidia-cuda-nvcc-cu12`
+都能办到。只有编译 `pointops` 这一个 CUDA 扩展需要 `nvcc`。
 
-### 步骤 1　拉取项目并把 `landmark_extension` 放进去
+### 7.A 路径 A：venv + pip（完整流程，无 conda）
+
+#### A-1　前置：克隆项目并把 `landmark_extension` 放进去
 
 ```bash
 git clone https://github.com/nnistelrooij/3dteethland.git
 cd 3dteethland
-```
 
-然后把 `landmark_extension/` 整个拷到**仓库根目录下**（与 `teethland/`、`train.py`、`setup.py`
-同级）：
-
-```bash
-# 方式 A：从已有副本拷进来
+# 把本目录放到仓库根目录（与 teethland/、train.py、setup.py 同级），
+# 位置会影响 run_landmark.py 与 configs 里 fold 路径的解析
 cp -r /path/to/landmark_extension ./landmark_extension
+# 或： git clone https://github.com/JohnTitor-elpsykongroo/landmark_extension landmark_extension
 
-# 方式 B：如果你把本目录单独做成了 git 仓库
-git clone <landmark_extension 的地址> landmark_extension
+# 数据集：把 Teeth3DS+ 拷到目标机，路径记下来，A10 会用到
+export DATA_ROOT=/data/Teeth3DS
+ls "$DATA_ROOT"                                  # upper/ lower/ 3DTeethLand_landmarks_train/ ...
+ls -d "$DATA_ROOT"/upper/*/     | wc -l          # 950
+ls -d "$DATA_ROOT"/lower/*/     | wc -l          # 950
+ls -d "$DATA_ROOT"/3DTeethLand_landmarks_train/upper/*/ | wc -l   # 120
+ls -d "$DATA_ROOT"/3DTeethLand_landmarks_train/lower/*/ | wc -l   # 120
 ```
 
-目录位置很关键：`run_landmark.py`、`configs/*.yaml` 里的 `fold` 路径等，都是按
-「`landmark_extension` 位于仓库根目录」来解析的。
+每个病例目录里应同时有 `<case>_<jaw>.obj`（mesh）与 `<case>_<jaw>.json`（逐顶点 FDI），
+landmark 目录里应有 `<case>_<jaw>__kpt.json`。
 
-自检：
+#### A0　前置确认
 
 ```bash
-ls landmark_extension/README.zh-CN.md landmark_extension/configs/landmark_upper.yaml
+nvidia-smi                      # 期望看到 RTX 5090；记下驱动报告的 CUDA 版本
+python3.10 -V                   # 需要 3.10 的解释器来建 venv
+gcc -dumpfullversion -dumpversion   # CUDA 12.8 要求 gcc <= 13
 ```
 
-### 步骤 2　准备数据集并核对结构
+如果机器上没有 `python3.10`（只有更高版本），要么用 pyenv/apt 装上，要么
+`export PY_VERSION=3.12` 并在第 A6 步换用存在 `cp312` wheel 的 torch 版本。
+
+#### A1　建 venv 并升级打包工具
 
 ```bash
-export DATA_ROOT=/data/Teeth3DS      # 改成你的实际路径
-ls "$DATA_ROOT"                      # 应看到 upper/ lower/ 3DTeethLand_landmarks_train/ ...
-ls "$DATA_ROOT/upper" | head         # 每个病例一个目录
-ls "$DATA_ROOT/upper/01328DDN"       # 应包含 01328DDN_upper.obj 与 01328DDN_upper.json
-ls "$DATA_ROOT/3DTeethLand_landmarks_train/upper" | head       # 每病例一个目录
-ls "$DATA_ROOT/3DTeethLand_landmarks_train/upper/013TXGFK"     # 应包含 013TXGFK_upper__kpt.json
+export REPO=/path/to/3dteethland
+export VENV=$REPO/.venv
+export PY="$VENV/bin/python"
+
+python3.10 -m venv "$VENV"
+"$PY" -m pip install -U pip wheel setuptools
+"$PY" -V && "$PY" -m pip -V
 ```
 
-所需的三段数据：**mesh（OBJ）**、**逐顶点 FDI 分割（同名 JSON）**、
-**`__kpt.json` landmark**。核对数量（应为 950 / 950 / 120 / 120）：
-
-```bash
-ls -d "$DATA_ROOT"/upper/*/     | wc -l
-ls -d "$DATA_ROOT"/lower/*/     | wc -l
-ls -d "$DATA_ROOT"/3DTeethLand_landmarks_train/upper/*/ | wc -l
-ls -d "$DATA_ROOT"/3DTeethLand_landmarks_train/lower/*/ | wc -l
-```
-
-### 步骤 3　创建环境
-
-```bash
-export ENV_PREFIX=$HOME/envs/3dteethland
-conda create -y -p "$ENV_PREFIX" python=3.10
-export PY="$ENV_PREFIX/bin/python"
-"$PY" -m pip install --upgrade pip wheel setuptools
-```
-
-### 步骤 4　安装带 `nvcc` 的 CUDA toolkit
-
-```bash
-conda install -y -p "$ENV_PREFIX" -c nvidia cuda-toolkit=12.8
-export CUDA_HOME="$ENV_PREFIX"
-export CUDA_PATH="$CUDA_HOME"
-"$ENV_PREFIX/bin/nvcc" --version
-```
-
-### 步骤 5　安装 torch（必须能支持 sm_120）
+#### A2　装 torch（必须支持 sm_120；为 A9 的 CUDA 初始化做准备）
 
 ```bash
 "$PY" -m pip install torch torchvision torchaudio \
     --index-url https://download.pytorch.org/whl/cu128
+
 "$PY" -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
+# 期望：2.11.0+cu128 12.8 True
 ```
 
-期望输出类似 `2.11.0+cu128 12.8 True`。**不要**按 `requirements.txt` 装 torch==2.3.0+cu121，
-那个版本不支持 sm_120 / 本机驱动。
+`==12.8` 是为了支持 sm_120 —— 注意不要装 `requirements.txt` 里钉的 torch 2.3.0+cu121
+（也不要用驱动报告的 13.0 去推断 wheel：cu128 的 wheel 在 13.x 驱动上正常运行，本机就是
+用 cu128 wheel + 13.2 驱动验证的）。
 
-### 步骤 6　安装项目其余依赖（手动剔除 torch 相关行）
-
-`requirements.txt` 里同时包含 torch 三件套与 torch-scatter，这些已经/将要单独处理，
-所以这里按下面这条安装即可（等价于「requirements 减去 torch 相关行」再加两个仓库漏声明的包）：
+#### A3　装 requirements 里除 torch 之外的依赖
 
 ```bash
 "$PY" -m pip install "numpy<2.0.0" lxml==5.2.2 opencv-python==4.10.0.84 \
     open3d==0.17.0 gco-wrapper==3.0.9 pymeshlab==2023.12.post1 pytest==8.2.2 \
     pytorch-lightning==2.3.3 tensorboard==2.17.0 timm==1.0.7 torchtyping==0.1.4
+```
 
-# 仓库实际 import 但 requirements.txt 未声明的依赖
+（等价于「原 `requirements.txt` 减去 torch 三件套与 torch-scatter 那几行」。）
+
+#### A4　补上仓库实际 import 但没写进 requirements 的包
+
+```bash
 "$PY" -m pip install scikit-learn pandas scikit-multilearn
+```
 
-# torch-scatter 必须与 torch 版本、CUDA 后缀严格匹配
+这三个是真实缺口：`teethland/tensor.py` 与 `teethland/data/transforms.py` 会 import
+`sklearn`，3DTeethLand 评测路径用 `pandas`，数据划分用
+`skmultilearn.model_selection.IterativeStratification`。
+
+#### A5　装 torch-scatter（版本必须与 torch / CUDA 后缀严格匹配）
+
+```bash
 "$PY" -m pip install torch-scatter \
     -f https://data.pyg.org/whl/torch-2.11.0+cu128.html
+
+"$PY" -c "import torch_scatter; print('torch_scatter', torch_scatter.__version__)"
 ```
 
-如果第 5 步装到的不是 2.11.0，把上面 `torch-2.11.0+cu128.html` 里的版本号改成你实际的
-torch 版本（用 `"$PY" -c "import torch; print(torch.__version__)"` 查）。若该索引没有对应
-wheel，就源码编译：`"$PY" -m pip install --no-build-isolation torch-scatter`。
+若 A2 装到的不是 2.11.0，把 URL 里的版本号换成
+`"$PY" -c "import torch; print(torch.__version__.split('+')[0])"` 的输出。该索引没有对应
+wheel 时改用源码编译：`"$PY" -m pip install --no-build-isolation torch-scatter`。
 
-### 步骤 7　编译 pointops CUDA 扩展
+#### A6　准备 `nvcc`（只有 pointops 需要）
+
+选一种：
 
 ```bash
-cd /path/to/3dteethland
-export TORCH_CUDA_ARCH_LIST=12.0        # RTX 5090 = sm_120
-export PATH="$CUDA_HOME/bin:$ENV_PREFIX/bin:$PATH"
-"$PY" setup.py build_ext --inplace      # 若失败，可改用： "$PY" -m pip install -v -e .
+# (a) 机器上已有系统 CUDA toolkit
+which nvcc && export CUDA_HOME="$(dirname "$(dirname "$(which nvcc)")")"
+
+# (b) 没有 toolkit：用 pip 装 nvcc，不需要 conda
+"$PY" -m pip install nvidia-cuda-nvcc-cu12==12.8.93
+export CUDA_HOME="$VENV"        # 该包的 nvcc 与 cuda_runtime.h 等头文件都在 venv 内
+
+export CUDA_PATH="$CUDA_HOME"
+export CPATH="$CUDA_HOME/include:${CPATH:-}"
+echo "CUDA_HOME=$CUDA_HOME"
+"$CUDA_HOME/bin/nvcc" --version
 ```
 
-编译成功后自检（这一步必须过，否则训练会在第一次 kNN/采样时崩）：
+需要 gcc ≤ 13（CUDA 12.8 的限制）：`gcc --version`。若系统 gcc 过新，用
+`export CC=gcc-12 CXX=g++-12`，或安装 CUDA 13 对应的 toolkit 后改
+`CUDA_HOME`/`TORCH_CUDA_ARCH_LIST`。
+
+#### A7　编译 `pointops` CUDA 扩展
 
 ```bash
+export TORCH_CUDA_ARCH_LIST=12.0          # RTX 5090 = sm_120
+export PATH="$CUDA_HOME/bin:$VENV/bin:$PATH"
+
+cd "$REPO"
+"$PY" setup.py build_ext --inplace        # 若失败，可改用："$PY" -m pip install -v -e .
+
+# 必须通过，否则训练会在第一次 kNN/采样时崩
 "$PY" -c "
 import torch, pointops
 print('pointops:', pointops.__file__)
@@ -288,7 +321,40 @@ print('fps ok:', tuple(idx.shape), idx.dtype)
 "
 ```
 
-### 步骤 8　改配置里的三处路径
+#### A8　装完自检（一次性确认环境可用）
+
+```bash
+"$PY" - <<'EOF'
+import importlib, torch
+for m in ["torch","torchvision","pytorch_lightning","torchmetrics","open3d",
+          "pymeshlab","cv2","timm","gco","lxml","sklearn","skmultilearn",
+          "torchtyping","torch_scatter","pointops"]:
+    try:
+        importlib.import_module(m); print(f" OK   {m}")
+    except Exception as e:
+        print(f" FAIL {m}: {type(e).__name__}: {e}")
+print("cuda:", torch.cuda.is_available(), torch.cuda.get_device_name(0) if torch.cuda.is_available() else "")
+EOF
+```
+
+#### A9　（可选）在 venv 里装 CUDA 运行库
+
+只在「系统没有任何 CUDA 运行库、上面的自检报找不到 `libcudart.so`」时才需要。
+好处是 torch 不再依赖系统 CUDA；对 8 GB 显存的笔记本（例如本机那台 RTX 5050）
+还有额外价值：多进程 dataloader 用 fork 时会带着已初始化的 CUDA 状态，容易报
+`Cannot re-initialize CUDA in forked subprocess`，先导入 CUDA 轮子可以在建 worker 前
+完成初始化，避开这个坑。
+
+```bash
+"$PY" -m pip install nvidia-cuda-nvrtc-cu12 nvidia-cuda-runtime-cu12 nvidia-cuda-cupti-cu12 nvidia-cudnn-cu12
+"$PY" -m pip install --no-deps --force-reinstall torch
+# --no-deps 是必须的：torch 声明的依赖集与 nvidia pip 轮子不兼容
+"$PY" -c "import torch; print(torch.__version__, torch.cuda.is_available())"
+```
+
+这一步不属于必需流程；跳过也能正常训练。
+
+#### A10　改配置里的三处路径
 
 在 `landmark_extension/configs/landmark_upper.yaml` 与 `landmark_lower.yaml` 里，把
 `datamodule` 下的路径改成目标机的：
@@ -300,53 +366,51 @@ datamodule:
   fold: 'landmark_extension/prepare/landmark_upper_fold_0.txt'         # lower.yaml 用 lower
 ```
 
-`fold` 可以保持相对路径（相对于仓库根目录解析）。如果你换了数据划分，用下面命令重新生成
+`fold` 可以保持相对路径（相对于仓库根目录解析）。若换了数据划分，用下面命令重新生成
 （注意它默认的 `--data-root` 是 Windows 路径，必须显式指定）：
 
 ```bash
 "$PY" landmark_extension/prepare/prepare_landmark_training_data.py --data-root /data/Teeth3DS
 ```
 
-### 步骤 9　数据链路验证（不训练）
+#### A11　数据链路验证（不训练）
 
 ```bash
-cd /path/to/3dteethland
+cd "$REPO"
 "$PY" landmark_extension/validation/check_data_adapter.py --jaw upper --cases 3
 "$PY" landmark_extension/validation/smoke_test_landmark_pipeline.py --jaw upper --batch-size 32
 ```
 
-第二条会跑 dataset → collate → forward → loss → backward 一次，并在
-`landmark_extension/validation/smoke_report.json` 里写出 `peak_memory_gb`。
-如果显存不够就把 `--batch-size` 调小，并同步改 config 里的 `batch_size`。
+第二条会跑 dataset → collate → forward → loss → backward 一次，并把 `peak_memory_gb` 写进
+`landmark_extension/validation/smoke_report.json`。显存不够就调小 `--batch-size`，并同步改
+config 里的 `batch_size`。
 
-### 步骤 10　启动训练
+#### A12　启动训练
 
 ```bash
-cd /path/to/3dteethland
+cd "$REPO"
 
 # 上颌
 "$PY" landmark_extension/run_landmark.py \
-    --config landmark_extension/configs/landmark_upper.yaml \
-    --devices 1
+    --config landmark_extension/configs/landmark_upper.yaml --devices 1
 
 # 下颌（另开一个进程/任务；一个 data module 只装一侧颌骨）
 "$PY" landmark_extension/run_landmark.py \
-    --config landmark_extension/configs/landmark_lower.yaml \
-    --devices 1
+    --config landmark_extension/configs/landmark_lower.yaml --devices 1
 ```
 
-续训 / 热启动加 `--checkpoint <ckpt>` 即可。若想用多卡：
-`--devices 2`（`train.py` 会在 `devices > 1` 时打开 `sync_batchnorm`）。
+续训 / 热启动加 `--checkpoint <ckpt>`；多卡用 `--devices 2`（`train.py` 会在
+`devices > 1` 时打开 `sync_batchnorm`）。
 
 产物位置：
 
-* checkpoint 与 TensorBoard 日志：`landmark_extension/runs/<version>/`（`version` 由 config 里的
-  `version` 决定，默认 `upper` / `lower`），TensorBoard 用
+* checkpoint 与 TensorBoard 日志：`landmark_extension/runs/<version>/`（`version` 由 config
+  里的 `version` 决定，默认 `upper` / `lower`），用
   `tensorboard --logdir landmark_extension/runs` 打开。
-* dataset 预处理缓存：文件名是数据集哈希 `xxxx.pkl`，**写在当前工作目录**。
-  所以请固定从仓库根目录启动；这个文件可以删，删掉只会重新预处理一次。
+* dataset 预处理缓存：文件名是数据集哈希 `xxxx.pkl`，**写在当前工作目录**。所以请固定从
+  仓库根目录启动；这个文件可以删，删掉只会重新预处理一次。
 
-### 步骤 11（可选）推理与评测
+#### A13　（可选）推理与评测
 
 ```bash
 # 推理（需要先有训练好的 checkpoint）
@@ -363,21 +427,59 @@ cd /path/to/3dteethland
     --out         landmark_extension/eval/scores_upper_fold_0.json
 ```
 
-### 7.1 手动流程与 `setup_linux.sh` 的对应关系
+### 7.B 路径 B：conda 环境（备选）
 
-| 手动步骤 | `setup_linux.sh` 中的对应阶段 |
+把 A1 替换成 conda 建环境，把 A6(a/b) 换成在环境里装 toolkit，其余步骤（A2–A5、A7–A13）
+完全一致：
+
+```bash
+export ENV_PREFIX=$HOME/envs/3dteethland
+conda create -y -p "$ENV_PREFIX" python=3.10
+export PY="$ENV_PREFIX/bin/python"
+"$PY" -m pip install -U pip wheel setuptools
+
+conda install -y -p "$ENV_PREFIX" -c nvidia cuda-toolkit=12.8
+export CUDA_HOME="$ENV_PREFIX"
+export CUDA_PATH="$CUDA_HOME"
+export CPATH="$CUDA_HOME/include:${CPATH:-}"
+"$CUDA_HOME/bin/nvcc" --version
+```
+
+因为 conda 环境里已经有了 `nvcc`，A6 可以直接跳过。
+
+### 7.C 两条路径的对照
+
+| 环节 | 路径 A（venv） | 路径 B（conda） |
+| --- | --- | --- |
+| 前置要求 | 系统有 `python3.10` | 系统有 conda/mamba |
+| 建环境 | `python3.10 -m venv $VENV` | `conda create -p $ENV_PREFIX python=3.10` |
+| 解释器路径 | `$VENV/bin/python` | `$ENV_PREFIX/bin/python` |
+| nvcc 来源 | 系统 toolkit 或 `pip install nvidia-cuda-nvcc-cu12` | `conda install -c nvidia cuda-toolkit=12.8` |
+| `CUDA_HOME` | `$VENV`（pip 轮子）或系统 CUDA 根 | `$ENV_PREFIX` |
+| torch / 依赖安装 | 完全相同的 pip 命令 | 完全相同的 pip 命令 |
+| 磁盘占用 | 更小（只装 CUDA 运行库子集） | 更大（整包 toolkit） |
+| 与 `setup_linux.sh` 一致 | `ENV_KIND=venv`（默认） | `ENV_KIND=conda` |
+
+两条路径产出的 Python 环境在功能上等价：`pointops` 是同一个 `setup.py` 编出来的，
+训练脚本、配置、验证、评测命令完全相同。
+
+### 7.D 手动流程与 `setup_linux.sh` 的对应关系
+
+| 手动步骤（路径 A） | `setup_linux.sh` 中的对应阶段 |
 | --- | --- |
-| 步骤 3 创建环境 | `[1/7]` |
-| 步骤 4 CUDA toolkit | `[2/7]` |
-| 步骤 5 torch | `[3/7]` |
-| 步骤 6 其余依赖 | `[4/7]` + `[5/7]` |
-| 步骤 7 编译 pointops | `[6/7]` |
-| 步骤 7 的自检 | `[7/7]` |
-| 步骤 1、2、8–11 | 脚本不涉及，必须手动做 |
+| A1 建 venv | `[1/7]` |
+| A6 准备 nvcc | `[2/7]` |
+| A2 装 torch | `[3/7]` |
+| A3 + A4 其余依赖 | `[4/7]` + `[5/7]` |
+| A7 编译 pointops | `[6/7]` |
+| A8 装完自检 | `[7/7]` |
+| A5 torch-scatter | 在 `[5/7]` 内 |
+| A9 CUDA 运行库（可选） | 脚本不涉及 |
+| A-1 克隆项目 + 数据集核对 | 脚本不涉及 |
+| A10–A13 改配置 / 验证 / 训练 / 评测 | 脚本不涉及，必须手动做 |
 
-也就是说：脚本只负责**环境**，项目放置、数据路径、验证和训练命令无论用不用脚本都要自己执行。
-
----
+脚本等价于：`ENV_KIND=venv ENV_PREFIX=<venv> bash landmark_extension/env/setup_linux.sh`，
+它只负责**环境**（A1–A8）；项目放置、数据路径、验证、训练与评测命令无论用不用脚本都要自己执行。
 
 ## 8. 模型是怎么训练的（结论来自源码，不是 README）
 

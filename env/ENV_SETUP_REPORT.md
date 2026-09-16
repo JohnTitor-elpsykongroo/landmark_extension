@@ -6,6 +6,14 @@ Blackwell), driver 596.58 (CUDA 13.2 capable), conda at `D:\WorkSpace\conda`.
 Target interpreter: `D:\WorkSpace\conda\envs\3dteethland\python.exe`
 (Python 3.10.21, created by this task).
 
+**Note on conda:** this report describes the Windows development machine, where
+conda was used. conda is **not** a requirement of the project - the repository
+imports only pip packages, `python -m venv` works equally well, and `nvcc`
+(needed solely to compile the `pointops` CUDA extension) can come from a system
+CUDA toolkit or from the `nvidia-cuda-nvcc-cu12` pip package instead. On the
+Linux deployment target `env/setup_linux.sh` therefore defaults to
+`ENV_KIND=venv`; conda is opt-in there.
+
 ## 1. Final state
 
 | Component | Version / state |
