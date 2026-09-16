@@ -93,9 +93,11 @@ bash landmark_extension/env/setup_linux.sh
 | --- | --- | --- |
 | `ENV_KIND` | `venv` | `venv`（默认，等价于 `python -m venv`）或 `conda` |
 | `ENV_PREFIX` | `$HOME/envs/3dteethland` | 环境安装位置 |
-| `CUDA_INDEX` | `https://download.pytorch.org/whl/cu128` | torch 下载源 |
-| `NVCC_WHEEL` | `nvidia-cuda-nvcc-cu12==12.8.93` | 只用 pip 提供 nvcc 时的包 |
-| `PYG_CUDA` | `cu128` | torch-scatter wheel 的 CUDA 后缀，需与 torch 匹配 |
+| `CUDA_VER` | `13.0` | 驱动一致的 CUDA 版本；设为 `12.8` 自动切换 torch/PyG/conda 三处 |
+| `CUDA_INDEX` | `.../whl/cu130` | torch 下载源（由 `CUDA_VER` 推导） |
+| `PYG_CUDA` | `cu130` | torch-scatter wheel 的 CUDA 后缀（由 `CUDA_VER` 推导） |
+| `CONDA_CUDA_TOOLKIT` | `cuda-toolkit=13.0` | conda 路径下安装的 toolkit（由 `CUDA_VER` 推导） |
+| `NVCC_WHEEL` | `12.8` 时才启用 | 只用 pip 提供 nvcc 时的包（13.0 无可用 pip 包） |
 | `TORCH_CUDA_ARCH_LIST` | `12.0` | RTX 5090 为 sm_120 |
 | `SKIP_TOOLKIT` | `0` | 设为 `1` 表示 nvcc 已在 PATH 或环境内，跳过自动获取 |
 
@@ -117,10 +119,37 @@ conda toolkit → pip 装 `nvidia-cuda-nvcc-cu12`」的顺序自动判断）→ 
 
 只有 `pointops` 这个 CUDA 扩展需要 nvcc，其余全部是纯 pip 依赖。
 
-关于 torch 版本选择：你的驱动支持 CUDA 13.0，**cu128 wheel 在 13.x 驱动上可以直接运行**
-（本机就是用 cu128 wheel 配 13.2 驱动跑通的）。如果想用更新的构建，可以
-`CUDA_INDEX=https://download.pytorch.org/whl/cu130`，但请同步把 `PYG_CUDA=cu130` 以匹配
-torch-scatter 的 wheel，并确认 pointops 仍能编过。
+### CUDA 版本怎么选（13.0 vs 12.8）
+
+先说最容易混淆的一点：`nvidia-smi` 里显示的 `CUDA Version: 13.0` 是**驱动支持的上限，
+不是要求**。CUDA 在小版本之间向后兼容——12.x 的运行时可以在 13.x 驱动上跑，反之不行。
+所以 cu128 和 cu130 的 torch wheel 在你这台机器上都能用。
+
+本脚本默认走 **13.0**，因为它是与你驱动一致的版本，而且现在全链路都齐了：
+
+| 组件 | cu130（默认） | cu128（备选） |
+| --- | --- | --- |
+| torch | `2.11.0+cu130`（cp310 linux/win wheel 都有） | `2.11.0+cu128` |
+| torch-scatter | PyG 索引有 `2.1.2+pt211cu130-cp310-linux_x86_64` | `2.1.2+pt211cu128` |
+| nvcc | conda `cuda-toolkit=13.0`（13.0.3）或系统 toolkit | 系统 toolkit，或 pip 的 `nvidia-cuda-nvcc-cu12==12.8.93` |
+| pip 版 nvcc | **没有**（PyPI 的 `nvidia-cuda-nvcc-cu13` 只有个 `0.0.1` 占位包，别装） | 有 |
+
+切换方式：`CUDA_VER=12.8 bash .../setup_linux.sh`（会自动把 torch 索引切成 `cu128`、
+PyG 后缀切成 `cu128`、conda toolkit 切成 `cuda-toolkit=12.8`，并启用 pip nvcc 回退）。
+
+两个版本对 gcc 的要求不同，这一点要留意：
+
+| | CUDA 12.8 | CUDA 13.0 |
+| --- | --- | --- |
+| 支持的 gcc 上限 | **13** | **14** |
+| 若系统 gcc 太新 | `export CC=gcc-12 CXX=g++-12` | `export CC=gcc-13 CXX=g++-13` |
+
+`TORCH_CUDA_ARCH_LIST=12.0`（RTX 5090 = sm_120）在两个版本下都适用。
+
+**需要说明的验证边界**：cu130 这条组合（torch 2.11.0+cu130 + PyG 的 cu130 wheel +
+CUDA 13.0 编 pointops）我核实了每个组件都存在、版本互相匹配，但**没有实际跑过编译**——
+本机是 Windows，CUDA 12.8 和 13.0 的 nvcc 都因为 MSVC 14.51 不受支持而无法编译。
+如果 13.0 下 `pointops` 编不过，用 `CUDA_VER=12.8` 重跑即可，那是本机验证过工具链的版本。
 
 关于 `python=3.10`：torch-scatter 的预编译 wheel 对每个 Python 小版本都单独构建，
 3.10 在 PyG 的 wheel 索引里覆盖最完整。如果换成 3.12，请先确认该 torch 版本在 PyG 索引里
@@ -215,7 +244,7 @@ landmark 目录里应有 `<case>_<jaw>__kpt.json`。
 ```bash
 nvidia-smi                      # 期望看到 RTX 5090；记下驱动报告的 CUDA 版本
 python3.10 -V                   # 需要 3.10 的解释器来建 venv
-gcc -dumpfullversion -dumpversion   # CUDA 12.8 要求 gcc <= 13
+gcc -dumpfullversion -dumpversion   # CUDA 13.0 要求 gcc <= 14；改用 12.8 时要求 <= 13
 ```
 
 如果机器上没有 `python3.10`（只有更高版本），要么用 pyenv/apt 装上，要么
@@ -237,15 +266,16 @@ python3.10 -m venv "$VENV"
 
 ```bash
 "$PY" -m pip install torch torchvision torchaudio \
-    --index-url https://download.pytorch.org/whl/cu128
+    --index-url https://download.pytorch.org/whl/cu130
 
 "$PY" -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
-# 期望：2.11.0+cu128 12.8 True
+# 期望：2.11.0+cu130 13.0 True
 ```
 
-`==12.8` 是为了支持 sm_120 —— 注意不要装 `requirements.txt` 里钉的 torch 2.3.0+cu121
-（也不要用驱动报告的 13.0 去推断 wheel：cu128 的 wheel 在 13.x 驱动上正常运行，本机就是
-用 cu128 wheel + 13.2 驱动验证的）。
+用 `cu130` 是为了同时满足 sm_120 和支持与驱动一致的 CUDA 13.0。两点提醒：不要装
+`requirements.txt` 里钉的 torch 2.3.0+cu121（不认 sm_120）；如果 `cu130` 这一组合在
+目标机上出问题，`cu128` 的 wheel 在 13.x 驱动上同样能跑（本机就是用 cu128 wheel + 13.2
+驱动验证通过的），即把上面 URL 换成 `cu128` —— 但记得 A5 的 torch-scatter 后缀也要跟着改。
 
 #### A3　装 requirements 里除 torch 之外的依赖
 
@@ -271,7 +301,7 @@ python3.10 -m venv "$VENV"
 
 ```bash
 "$PY" -m pip install torch-scatter \
-    -f https://data.pyg.org/whl/torch-2.11.0+cu128.html
+    -f https://data.pyg.org/whl/torch-2.11.0+cu130.html
 
 "$PY" -c "import torch_scatter; print('torch_scatter', torch_scatter.__version__)"
 ```
@@ -279,18 +309,25 @@ python3.10 -m venv "$VENV"
 若 A2 装到的不是 2.11.0，把 URL 里的版本号换成
 `"$PY" -c "import torch; print(torch.__version__.split('+')[0])"` 的输出。该索引没有对应
 wheel 时改用源码编译：`"$PY" -m pip install --no-build-isolation torch-scatter`。
+后缀（`cu130` / `cu128`）必须与 A2 装的 torch 一致。
 
 #### A6　准备 `nvcc`（只有 pointops 需要）
 
-选一种：
+选一种。注意默认目标是 **CUDA 13.0**，它**没有可用的 pip 版 nvcc**（PyPI 上的
+`nvidia-cuda-nvcc-cu13` 只是个 `0.0.1` 占位包），所以 13.0 请走 (a) 或 (b)；
+只有切到 12.8 时才用 (c)：
 
 ```bash
-# (a) 机器上已有系统 CUDA toolkit
+# (a) 机器上已有系统 CUDA toolkit（13.0 或 12.x 都行）
 which nvcc && export CUDA_HOME="$(dirname "$(dirname "$(which nvcc)")")"
 
-# (b) 没有 toolkit：用 pip 装 nvcc，不需要 conda
-"$PY" -m pip install nvidia-cuda-nvcc-cu12==12.8.93
-export CUDA_HOME="$VENV"        # 该包的 nvcc 与 cuda_runtime.h 等头文件都在 venv 内
+# (b) 没有 toolkit 且接受 conda：装与驱动一致的 CUDA 13.0 toolkit
+conda install -y -p "$ENV_PREFIX" -c nvidia cuda-toolkit=13.0
+export CUDA_HOME="$ENV_PREFIX"
+
+# (c) 只用 CUDA 12.8 时的 pip 方案（13.0 不适用）
+# "$PY" -m pip install nvidia-cuda-nvcc-cu12==12.8.93
+# export CUDA_HOME="$VENV"      # 该包的 nvcc 与 cuda_runtime.h 等头文件都在 venv 内
 
 export CUDA_PATH="$CUDA_HOME"
 export CPATH="$CUDA_HOME/include:${CPATH:-}"
@@ -298,9 +335,8 @@ echo "CUDA_HOME=$CUDA_HOME"
 "$CUDA_HOME/bin/nvcc" --version
 ```
 
-需要 gcc ≤ 13（CUDA 12.8 的限制）：`gcc --version`。若系统 gcc 过新，用
-`export CC=gcc-12 CXX=g++-12`，或安装 CUDA 13 对应的 toolkit 后改
-`CUDA_HOME`/`TORCH_CUDA_ARCH_LIST`。
+gcc 版本要求随 CUDA 版本变：**CUDA 13.0 要求 gcc ≤ 14，CUDA 12.8 要求 ≤ 13**。
+先用 `gcc --version` 确认；过新时用 `export CC=gcc-13 CXX=g++-13`（12.8 用 `gcc-12`）。
 
 #### A7　编译 `pointops` CUDA 扩展
 
@@ -438,7 +474,7 @@ conda create -y -p "$ENV_PREFIX" python=3.10
 export PY="$ENV_PREFIX/bin/python"
 "$PY" -m pip install -U pip wheel setuptools
 
-conda install -y -p "$ENV_PREFIX" -c nvidia cuda-toolkit=12.8
+conda install -y -p "$ENV_PREFIX" -c nvidia cuda-toolkit=13.0
 export CUDA_HOME="$ENV_PREFIX"
 export CUDA_PATH="$CUDA_HOME"
 export CPATH="$CUDA_HOME/include:${CPATH:-}"
@@ -454,7 +490,7 @@ export CPATH="$CUDA_HOME/include:${CPATH:-}"
 | 前置要求 | 系统有 `python3.10` | 系统有 conda/mamba |
 | 建环境 | `python3.10 -m venv $VENV` | `conda create -p $ENV_PREFIX python=3.10` |
 | 解释器路径 | `$VENV/bin/python` | `$ENV_PREFIX/bin/python` |
-| nvcc 来源 | 系统 toolkit 或 `pip install nvidia-cuda-nvcc-cu12` | `conda install -c nvidia cuda-toolkit=12.8` |
+| nvcc 来源 | 系统 toolkit（13.0）或 12.8 下 `pip install nvidia-cuda-nvcc-cu12` | `conda install -c nvidia cuda-toolkit=13.0` |
 | `CUDA_HOME` | `$VENV`（pip 轮子）或系统 CUDA 根 | `$ENV_PREFIX` |
 | torch / 依赖安装 | 完全相同的 pip 命令 | 完全相同的 pip 命令 |
 | 磁盘占用 | 更小（只装 CUDA 运行库子集） | 更大（整包 toolkit） |

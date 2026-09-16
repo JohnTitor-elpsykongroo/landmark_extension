@@ -49,15 +49,17 @@ bash landmark_extension/env/setup_linux.sh
 | --- | --- | --- |
 | `ENV_KIND` | `venv` | `venv` (default, i.e. `python -m venv`) or `conda` |
 | `ENV_PREFIX` | `$HOME/envs/3dteethland` | where the environment is created |
-| `CUDA_INDEX` | `https://download.pytorch.org/whl/cu128` | torch wheel index |
-| `NVCC_WHEEL` | `nvidia-cuda-nvcc-cu12==12.8.93` | pip package used when nvcc comes from pip |
-| `PYG_CUDA` | `cu128` | torch-scatter wheel suffix, must match torch |
+| `CUDA_VER` | `13.0` | CUDA version matching the driver; `12.8` switches torch/PyG/conda together |
+| `CUDA_INDEX` | `.../whl/cu130` | torch wheel index (derived from `CUDA_VER`) |
+| `PYG_CUDA` | `cu130` | torch-scatter wheel suffix (derived from `CUDA_VER`) |
+| `CONDA_CUDA_TOOLKIT` | `cuda-toolkit=13.0` | toolkit installed on the conda path (derived) |
+| `NVCC_WHEEL` | only used for `12.8` | pip nvcc package (none exists for 13.0) |
 | `TORCH_CUDA_ARCH_LIST` | `12.0` | RTX 5090 is sm_120 |
 | `SKIP_TOOLKIT` | `0` | set to `1` when nvcc is already on PATH / in the env |
 
 The script creates the env (`python -m venv` by default), provisions `nvcc`
 (auto-detected in this order: already in the env -> on PATH -> conda toolkit ->
-`pip install nvidia-cuda-nvcc-cu12`), installs cu128 torch, installs the project
+`pip install nvidia-cuda-nvcc-cu12`), installs cu130 torch, installs the project
 requirements plus the undeclared `scikit-learn` / `pandas` / `scikit-multilearn`
 imports, installs `torch-scatter` (prebuilt wheel, falling back to a source
 build), builds `pointops` in place, and finishes with a self-check that runs a
@@ -70,11 +72,31 @@ only ever a convenient supplier of `nvcc`, and pip can supply that too:
 | Situation | What happens |
 | --- | --- |
 | system CUDA toolkit present | used directly, conda never involved |
-| no toolkit | `NVCC_WHEEL` (default `nvidia-cuda-nvcc-cu12==12.8.93`, which also ships `cuda_runtime.h` and friends) is pip-installed into the venv |
+| no toolkit | `NVCC_WHEEL` (`nvidia-cuda-nvcc-cu12==12.8.93`, which also ships `cuda_runtime.h`); only offered on the `CUDA_VER=12.8` path, because CUDA 13 has no usable pip nvcc |
 | you prefer conda | `ENV_KIND=conda` |
 
 `nvcc` is needed for exactly one thing - compiling the `pointops` CUDA
 extension. Everything else is plain pip.
+
+### Which CUDA version, 13.0 or 12.8?
+
+The `CUDA Version: 13.0` that `nvidia-smi` prints is the **maximum** the driver
+supports, not a requirement. CUDA is minor-version backward compatible, so a
+`cu128` wheel runs on a 13.x driver (and vice versa does not). Both work here;
+the script targets **13.0** because that matches your driver and the whole chain
+exists for it:
+
+| Component | cu130 (default) | cu128 (fallback) |
+| --- | --- | --- |
+| torch | `2.11.0+cu130` (cp310 linux/win wheels published) | `2.11.0+cu128` |
+| torch-scatter | PyG publishes `2.1.2+pt211cu130-cp310-linux_x86_64` | `2.1.2+pt211cu128` |
+| nvcc | conda `cuda-toolkit=13.0` (13.0.3) or a system toolkit | system toolkit, or pip `nvidia-cuda-nvcc-cu12==12.8.93` |
+| pip nvcc | **none usable** (PyPI's `nvidia-cuda-nvcc-cu13` is a `0.0.1` placeholder) | available |
+
+Switch with `CUDA_VER=12.8 bash .../setup_linux.sh`, which retargets the torch
+index, the PyG suffix and the conda toolkit in one go.
+
+The gcc ceiling differs: **CUDA 13.0 allows gcc <= 14, CUDA 12.8 allows <= 13**.
 
 `configs/landmark_<jaw>.yaml` is already tuned for the 5090
 (`batch_size: 32`, `num_workers: 8`; the repository baseline is 8 / 4), and the
@@ -589,7 +611,7 @@ Each case directory must contain both `<case>_<jaw>.obj` (mesh) and
 ```bash
 nvidia-smi                          # expect the RTX 5090 + the CUDA version the driver reports
 python3.10 -V                       # needed to create the venv
-gcc -dumpfullversion -dumpversion   # CUDA 12.8 requires gcc <= 13
+gcc -dumpfullversion -dumpversion   # CUDA 13.0 requires gcc <= 14; 12.8 requires <= 13
 ```
 
 If there is no `python3.10` (only newer), install it via pyenv/apt, or set
@@ -611,16 +633,17 @@ python3.10 -m venv "$VENV"
 
 ```bash
 "$PY" -m pip install torch torchvision torchaudio \
-    --index-url https://download.pytorch.org/whl/cu128
+    --index-url https://download.pytorch.org/whl/cu130
 
 "$PY" -c "import torch; print(torch.__version__, torch.version.cuda, torch.cuda.is_available())"
-# expect: 2.11.0+cu128 12.8 True
+# expect: 2.11.0+cu130 13.0 True
 ```
 
-`cu128` is what carries sm_120 support. Do **not** install the `torch==2.3.0`
-pinned in `requirements.txt`, and do not infer the wheel suffix from the driver
-version reported by nvidia-smi: the cu128 wheel runs fine on a 13.x driver (that
-is exactly how the Windows development machine was verified).
+`cu130` carries both sm_120 support and the CUDA runtime matching your driver.
+Do **not** install the `torch==2.3.0` pinned in `requirements.txt` (no sm_120).
+If the cu130 combination misbehaves on the target machine, switch to `cu128` -
+that wheel also runs on a 13.x driver (it is what the Windows development machine
+was verified with) - and change the A5 suffix to match.
 
 #### A3 Install the requirements except the torch packages
 
@@ -647,7 +670,7 @@ uses `pandas`, and the fold split uses
 
 ```bash
 "$PY" -m pip install torch-scatter \
-    -f https://data.pyg.org/whl/torch-2.11.0+cu128.html
+    -f https://data.pyg.org/whl/torch-2.11.0+cu130.html
 
 "$PY" -c "import torch_scatter; print('torch_scatter', torch_scatter.__version__)"
 ```
@@ -655,19 +678,26 @@ uses `pandas`, and the fold split uses
 If A2 gave you a different torch version, replace `2.11.0` with the output of
 `"$PY" -c "import torch; print(torch.__version__.split('+')[0])"`. If the index
 has no matching wheel, build from source:
-`"$PY" -m pip install --no-build-isolation torch-scatter`.
+`"$PY" -m pip install --no-build-isolation torch-scatter`. The suffix
+(`cu130` / `cu128`) must match whatever A2 installed.
 
 #### A6 Provide `nvcc` (only `pointops` needs it)
 
-Pick one:
+Pick one. The default target is **CUDA 13.0**, which has **no usable pip nvcc**
+(PyPI's `nvidia-cuda-nvcc-cu13` is just a `0.0.1` placeholder), so use (a) or (b)
+for 13.0; (c) only applies if you went with `CUDA_VER=12.8`:
 
 ```bash
-# (a) a system CUDA toolkit is already installed
+# (a) a system CUDA toolkit is already installed (13.0 or 12.x)
 which nvcc && export CUDA_HOME="$(dirname "$(dirname "$(which nvcc)")")"
 
-# (b) no toolkit: get nvcc from pip - still no conda
-"$PY" -m pip install nvidia-cuda-nvcc-cu12==12.8.93
-export CUDA_HOME="$VENV"        # this package ships nvcc and cuda_runtime.h inside the venv
+# (b) no toolkit and conda is acceptable: install the driver-matching 13.0 toolkit
+conda install -y -p "$ENV_PREFIX" -c nvidia cuda-toolkit=13.0
+export CUDA_HOME="$ENV_PREFIX"
+
+# (c) pip nvcc - only available on the CUDA 12.8 path
+# "$PY" -m pip install nvidia-cuda-nvcc-cu12==12.8.93
+# export CUDA_HOME="$VENV"      # this package ships nvcc and cuda_runtime.h inside the venv
 
 export CUDA_PATH="$CUDA_HOME"
 export CPATH="$CUDA_HOME/include:${CPATH:-}"
@@ -675,9 +705,9 @@ echo "CUDA_HOME=$CUDA_HOME"
 "$CUDA_HOME/bin/nvcc" --version
 ```
 
-gcc must be <= 13 for CUDA 12.8 (`gcc --version`); if the system gcc is newer,
-either `export CC=gcc-12 CXX=g++-12` or install a CUDA 13 toolkit and adjust
-`CUDA_HOME` / `TORCH_CUDA_ARCH_LIST`.
+The gcc ceiling depends on the CUDA version: **<= 14 for CUDA 13.0, <= 13 for
+CUDA 12.8**. Check with `gcc --version`; if it is newer, use
+`export CC=gcc-13 CXX=g++-13` (or `gcc-12` on the 12.8 path).
 
 #### A7 Build the pointops CUDA extension
 
@@ -815,7 +845,7 @@ conda create -y -p "$ENV_PREFIX" python=3.10
 export PY="$ENV_PREFIX/bin/python"
 "$PY" -m pip install -U pip wheel setuptools
 
-conda install -y -p "$ENV_PREFIX" -c nvidia cuda-toolkit=12.8
+conda install -y -p "$ENV_PREFIX" -c nvidia cuda-toolkit=13.0
 export CUDA_HOME="$ENV_PREFIX"
 export CUDA_PATH="$CUDA_HOME"
 export CPATH="$CUDA_HOME/include:${CPATH:-}"
@@ -831,7 +861,7 @@ Because the conda env already provides `nvcc`, A6 can be skipped entirely.
 | prerequisite | `python3.10` on the system | conda/mamba on the system |
 | create env | `python3.10 -m venv $VENV` | `conda create -p $ENV_PREFIX python=3.10` |
 | interpreter path | `$VENV/bin/python` | `$ENV_PREFIX/bin/python` |
-| nvcc source | system toolkit, or `pip install nvidia-cuda-nvcc-cu12` | `conda install -c nvidia cuda-toolkit=12.8` |
+| nvcc source | system toolkit (13.0), or `pip install nvidia-cuda-nvcc-cu12` on the 12.8 path | `conda install -c nvidia cuda-toolkit=13.0` |
 | `CUDA_HOME` | `$VENV` (pip wheel) or the system CUDA root | `$ENV_PREFIX` |
 | torch / dependency install | identical pip commands | identical pip commands |
 | disk footprint | smaller (only a subset of CUDA runtime) | larger (full toolkit) |
