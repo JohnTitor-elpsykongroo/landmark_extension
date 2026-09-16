@@ -1,0 +1,89 @@
+# Landmark training config for the Teeth3DS+ landmark annotations (maxilla).
+#
+# This is a task-local config that reuses the repository's machinery unchanged:
+#   * `datamodule` keys are passed straight to TeethLandDataModule
+#   * `model.landmarks` keys are passed straight to LandmarkNet
+#   * `dbscan_cfg` is forwarded into LandmarkNet / PointTensor.cluster
+#
+# Run with:
+#   python train.py landmarks --config landmark_extension/configs/landmark_upper.yaml
+# (a thin runner that forwards --config is provided at
+#  landmark_extension/run_landmark.py)
+
+work_dir: 'landmark_extension/runs'
+version: upper
+seed: 0
+
+model:
+  landmarks:
+    channels_list: [48, 96, 192, 256]
+    out_channels: [1, 4, 4, 4, 4, 4]
+    depths: [3, 9, 3]
+    heads_list: [6, 12, 24]
+    window_sizes: [0.1, 0.2, 0.4]
+    point_embedding:
+      use: True
+      kpconv_point_influence: 0.02
+      kpconv_ball_radius: 0.05
+    stratified_union: False
+    downsample_ratio: 0.26
+    max_drop_path_prob: 0.3
+    stratified_downsample_ratio: 0.26
+    crpe_bins: 80
+    transformer_lr_ratio: 0.1
+    # no pretrained checkpoint exists locally; set this to train from scratch
+    checkpoint_path: null
+    lr: 0.0006
+    weight_decay: 0.0001
+    epochs: 500
+    warmup_epochs: 5
+
+  dbscan_cfg:
+    max_neighbor_dist: 0.03
+    min_points: 40
+    weighted_cluster: True
+    weighted_average: True
+
+accumulate_grad_batches: 1
+gradient_clip_norm: 35
+
+out_dir: 'landmark_extension/preds/upper'
+
+datamodule:
+  # --- CHANGE THESE THREE FOR THE TARGET MACHINE -------------------------
+  # These are absolute paths from the Windows development machine. On the
+  # Linux + RTX 5090 box, point them at that machine's copies of the data and
+  # of the generated fold file. Nothing else has to change.
+  root: 'D:/WorkSpace/Dental/data/Teeth3DS'
+  landmarks_root: 'D:/WorkSpace/Dental/data/Teeth3DS/3DTeethLand_landmarks_train/upper'
+  regex_filter: 'upper'
+  extensions: ['obj']
+  fold: 'landmark_extension/prepare/landmark_upper_fold_0.txt'
+  norm: true
+  clean: true
+  val_size: 0.2
+  include_val_as_train: False
+  sampler: 'balanced'
+  batch: null
+  # --- tuned for the RTX 5090 / 128 GB Linux target -----------------------
+  # The stock repository value is batch_size: 8 / num_workers: 4 (the Windows
+  # 8 GB RTX 5050 baseline). The 5090's 32 GB VRAM fits ~4x that; verify with
+  # landmark_extension/validation/smoke_test_landmark_pipeline.py which reports
+  # the measured peak VRAM before you commit to a number.
+  # If you raise batch_size beyond 8, the repo's lr (6e-4) was tuned for
+  # batch 8; a linear-scaling equivalent would be 1.2e-3 for batch 32.
+  batch_size: 32
+  num_workers: 8
+  pin_memory: True
+  persistent_workers: True
+  uniform_density_voxel_size: [0.025, 0.01]
+  proposal_points: 12000
+  # max_proposals changes how many teeth are seen per scan per epoch; the repo
+  # value is 8. Raising it to 12-16 is a semantic change, not just throughput.
+  max_proposals: 8
+  m3_as_m2: False
+  distinguish_left_right: true
+  random_partial: False
+  distinguish_upper_lower: False
+  label_as_instance: False
+  with_color: False

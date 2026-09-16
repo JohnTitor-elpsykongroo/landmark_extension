@@ -1,0 +1,33 @@
+# --- generated outputs: never commit ---
+
+# training products
+runs/
+preds/
+
+# run logs captured on this machine (contain absolute local paths)
+env/pointops_build.log
+*.log
+
+# smoke-test reports are regenerated per machine
+validation/smoke_report.json
+
+# exported OBJ visualisations (large; regenerate with check/visualize_landmarks.py)
+check/visualizations/
+
+# --- python noise ---
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+.mypy_cache/
+.ipynb_checkpoints/
+
+# --- dataset preprocessing cache written by DatasetCache into the CWD ---
+# (a <hash>.pkl file; harmless to delete, regenerated on first use)
+[0-9a-f][0-9a-f][0-9a-f][0-9a-f]*.pkl
+
+# --- OS / editor ---
+.DS_Store
+Thumbs.db
+.vscode/
+.idea/

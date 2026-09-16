@@ -1,0 +1,76 @@
+# Landmark training config for the Teeth3DS+ landmark annotations (mandible).
+#
+# Identical to landmark_upper.yaml except for the jaw-specific data paths,
+# the fold file, the run name and the prediction output directory.
+#
+# Run with:
+#   python landmark_extension/run_landmark.py --config landmark_extension/configs/landmark_lower.yaml
+
+work_dir: 'landmark_extension/runs'
+version: lower
+seed: 0
+
+model:
+  landmarks:
+    channels_list: [48, 96, 192, 256]
+    out_channels: [1, 4, 4, 4, 4, 4]
+    depths: [3, 9, 3]
+    heads_list: [6, 12, 24]
+    window_sizes: [0.1, 0.2, 0.4]
+    point_embedding:
+      use: True
+      kpconv_point_influence: 0.02
+      kpconv_ball_radius: 0.05
+    stratified_union: False
+    downsample_ratio: 0.26
+    max_drop_path_prob: 0.3
+    stratified_downsample_ratio: 0.26
+    crpe_bins: 80
+    transformer_lr_ratio: 0.1
+    checkpoint_path: null
+    lr: 0.0006
+    weight_decay: 0.0001
+    epochs: 500
+    warmup_epochs: 5
+
+  dbscan_cfg:
+    max_neighbor_dist: 0.03
+    min_points: 40
+    weighted_cluster: True
+    weighted_average: True
+
+accumulate_grad_batches: 1
+gradient_clip_norm: 35
+
+out_dir: 'landmark_extension/preds/lower'
+
+datamodule:
+  # --- CHANGE THESE THREE FOR THE TARGET MACHINE -------------------------
+  # See the note in landmark_upper.yaml: these are the Windows development
+  # machine's absolute paths and must be repointed on the Linux RTX 5090 box.
+  root: 'D:/WorkSpace/Dental/data/Teeth3DS'
+  landmarks_root: 'D:/WorkSpace/Dental/data/Teeth3DS/3DTeethLand_landmarks_train/lower'
+  regex_filter: 'lower'
+  extensions: ['obj']
+  fold: 'landmark_extension/prepare/landmark_lower_fold_0.txt'
+  norm: true
+  clean: true
+  val_size: 0.2
+  include_val_as_train: False
+  sampler: 'balanced'
+  batch: null
+  # --- tuned for the RTX 5090 / 128 GB Linux target (see landmark_upper.yaml
+  # for the longer explanation; the stock repository value is 8 / 4) --------
+  batch_size: 32
+  num_workers: 8
+  pin_memory: True
+  persistent_workers: True
+  uniform_density_voxel_size: [0.025, 0.01]
+  proposal_points: 12000
+  max_proposals: 8
+  m3_as_m2: False
+  distinguish_left_right: true
+  random_partial: False
+  distinguish_upper_lower: False
+  label_as_instance: False
+  with_color: False
