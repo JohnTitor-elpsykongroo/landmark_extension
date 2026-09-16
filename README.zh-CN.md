@@ -15,6 +15,43 @@
 从拉取项目、放 `landmark_extension`、核对数据集、建环境、装依赖、编译 pointops，
 到改配置、跑验证、启动训练，全部是可复制的命令。
 
+### 本目录是一个独立 git 仓库
+
+远端：<https://github.com/JohnTitor-elpsykongroo/landmark_extension>（分支 `main`）
+
+它的 git 目录**放在工作树之外**，目的是让外层 3dteethland 检出把
+`landmark_extension/` 当作普通目录，而不是嵌套仓库/submodule：
+
+```
+<3dteethland>/
+  landmark_extension/        <- 工作树（本目录，普通文件，没有 .git）
+  landmark_extension.git/    <- git 目录（HEAD、objects、refs ... 都在这里）
+  .git/
+  .gitignore                 <- 其中包含 landmark_extension/ 与 landmark_extension.git/
+```
+
+因此**不要**把 `landmark_extension.git` 挪回 `landmark_extension/.git`，否则外层会重新
+把它识别成嵌套仓库。
+
+在这个仓库里提交/推送有两种方式：
+
+```bash
+# 方式一：用附带的包装脚本（推荐）
+bash landmark_extension.git/git.sh status -sb
+bash landmark_extension.git/git.sh add -A
+bash landmark_extension.git/git.sh commit -m "message"
+bash landmark_extension.git/git.sh push
+bash landmark_extension.git/git.sh log --oneline -5
+
+# 方式二：手动指定 git-dir 与 work-tree
+git --git-dir=landmark_extension.git --work-tree=landmark_extension status -sb
+git --git-dir=landmark_extension.git --work-tree=landmark_extension commit -am "message"
+```
+
+如果在别的机器上（例如 RTX 5090 那台）只想改代码再推回去，最省事的做法是直接
+`git clone https://github.com/JohnTitor-elpsykongroo/landmark_extension` 到一个临时目录，
+改完提交推送即可，不必复制上面这套 work-tree 布局。
+
 ---
 
 ## 1. 状态总览

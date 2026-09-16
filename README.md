@@ -73,6 +73,46 @@ the steps the script does *not* cover (where to put `landmark_extension/`, how
 to verify the dataset, how to repoint the configs, how to validate, how to
 start training, how to run inference/evaluation).
 
+### This directory is its own git repository
+
+Remote: <https://github.com/JohnTitor-elpsykongroo/landmark_extension>
+(branch `main`).
+
+Its git directory deliberately lives **outside** the work tree, so the
+surrounding 3dteethland checkout sees `landmark_extension/` as a plain
+directory rather than a nested repository / gitlink:
+
+```
+<3dteethland>/
+  landmark_extension/        <- work tree (this directory, regular files, no .git)
+  landmark_extension.git/    <- git directory (HEAD, objects, refs, ...)
+  .git/
+  .gitignore                 <- contains landmark_extension/ and landmark_extension.git/
+```
+
+So do **not** move `landmark_extension.git` back to
+`landmark_extension/.git` - that would make the outer repository treat it as a
+nested repo again.
+
+To commit or push from this repository:
+
+```bash
+# preferred: the bundled wrapper
+bash landmark_extension.git/git.sh status -sb
+bash landmark_extension.git/git.sh add -A
+bash landmark_extension.git/git.sh commit -m "message"
+bash landmark_extension.git/git.sh push
+
+# or by hand
+git --git-dir=landmark_extension.git --work-tree=landmark_extension status -sb
+git --git-dir=landmark_extension.git --work-tree=landmark_extension commit -am "message"
+```
+
+On another machine (for example the RTX 5090 box) you can simply
+`git clone https://github.com/JohnTitor-elpsykongroo/landmark_extension` into a
+scratch directory when you only need to edit and push back; the work-tree layout
+above is only needed when it has to sit inside the 3dteethland checkout.
+
 ---
 
 ## 2. How the model trains (from the source, not the README)
