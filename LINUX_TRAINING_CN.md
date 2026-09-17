@@ -139,9 +139,11 @@ python run_landmark_train.py --config config-landmarks-full.yaml --devices 1 \
 
 显存允许后再增加 `batch_size`、`max_proposals` 或 `proposal_points`。显存不足先降低后三项。恢复时指定 `--resume /path/to/last.ckpt`，并使用**新的** `version` 目录。保存最终 YAML、`pip freeze`、训练日志和所用病例清单，保证结果可追溯。
 
-## 5. 用训练权重识别测试 OBJ
+## 5. 原项目整颌推理入口的当前限制
 
 原 `infer.py landmarks` 使用完整模型：实例分割 checkpoint + 上述位点 checkpoint。若没有实例分割 checkpoint，先从原项目 README 所述来源取得兼容权重，或另行训练实例分割；不能仅填位点权重。若不提供配准 checkpoint，下面关闭 `do_align`，要求测试 OBJ 与训练数据使用相同的姿态/尺度约定。测试文件名必须含 `_upper` 或 `_lower`，例如 `CASE_upper.obj`。
+
+**当前原代码还有一处已确认的阻断点**：`FullNet.landmarks_process` 使用未定义的 `preds`，`predict_step` 又可能吞掉逐例异常。因此下方命令仅记录原项目完整推理入口及配置方式，不能当作已验证可用的整颌方案；在扩展目录另行修复并实测前，不应将其输出状态标为完成。第 6 节的 FDI 条件推理不经过这个函数，可先用于无位点真值的病例检查。
 
 ```bash
 export TEST=/absolute/path/to/test_meshes   # 测试目录中只放待识别的 OBJ
@@ -176,3 +178,34 @@ find "$EXT/predictions/landmarks_test_001" -name '*__kpt.json' | wc -l
 每例预期产生 `CASE_upper__kpt.json`（`objects` 中有 `class`、`coord`、`score`）。核对输出文件数是否等于输入数，并抽看坐标与网格是否对齐；空 `objects`、少文件或异常日志都算失败。**原 `FullNet.predict_step` 会吞掉部分逐例异常**，所以不能只凭进程退出码判断成功。不要在原始测试目录中写预测结果；每次推理使用新的 `version` 和输出目录。
 
 训练 checkpoint 的兼容性取决于模型配置和实例分割类别设置。若载入失败，先核对两次运行的完整 YAML、checkpoint 文件和 PyTorch 版本；不要强行忽略缺失权重。
+
+## 6. 测试有 FDI 标注、无位点标注的 Teeth3DS+ 病例
+
+这种测试可直接用真值牙齿实例/FDI 生成单牙输入，**不需要实例分割 checkpoint**。原 `infer.py landmarks` 不读取测试 JSON，因此改用扩展入口 `infer_fdi_landmarks.py`。这是 `GT_FDI_INSTANCE_CONDITIONED` 测试，不代表从 OBJ 自动完成分割与位点识别。输入 JSON 必须与 OBJ 同名，且逐顶点有 `labels`（FDI）和 `instances`；只有一份牙位清单而没有逐顶点实例标注时，不能直接运行。输出回到原始 OBJ 坐标系，并投影到网格表面。
+
+单病例，`ID_upper` 换成实际病例名：
+
+```bash
+cd "$EXT"
+source .venv/bin/activate
+export PYTHONPATH="$PROJECT${PYTHONPATH:+:$PYTHONPATH}"
+export LAND_CKPT=/absolute/path/to/the/best/landmarks-XXX.ckpt
+python infer_fdi_landmarks.py \
+  --config config-landmarks-full.yaml --checkpoint "$LAND_CKPT" \
+  --mesh "$DATA/upper/ID/ID_upper.obj" \
+  --annotation "$DATA/upper/ID/ID_upper.json" \
+  --exclude-landmarks-root "$DATA/3DTeethLand_landmarks_train" \
+  --out-dir "$EXT/predictions/fdi_single_001"
+```
+
+批量处理上、下颌所有**没有位点标注**的配对病例：
+
+```bash
+python infer_fdi_landmarks.py \
+  --config config-landmarks-full.yaml --checkpoint "$LAND_CKPT" \
+  --input-root "$DATA/upper" "$DATA/lower" \
+  --exclude-landmarks-root "$DATA/3DTeethLand_landmarks_train" \
+  --out-dir "$EXT/predictions/fdi_batch_001"
+```
+
+脚本递归查找 OBJ，要求同目录有同名 JSON，自动排除 `--exclude-landmarks-root` 中已有 `__kpt.json` 的病例。若只想处理一批病例，把其 OBJ/JSON 以文件软链接放入新的测试视图，并把该视图传给 `--input-root`。每次换一个新的 `--out-dir`；脚本拒绝覆盖旧结果。输出为每例 `ID_upper__kpt.json` 和汇总 `status.json`，逐例打印进度；有病例失败时以非零状态退出。请检查 `status.json` 的 `COMPLETED_NO_LANDMARK_GROUND_TRUTH`、成功/失败数，并在原始网格上人工查看坐标。由于没有位点真值，不能把输出当作位点精度评估。当前命令仍需在目标 Linux 机器完成首例运行验证。
