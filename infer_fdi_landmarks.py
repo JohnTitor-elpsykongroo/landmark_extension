@@ -5,6 +5,12 @@ import json
 import sys
 from pathlib import Path
 
+PROJECT_ROOT = Path(__file__).resolve().parent.parent
+if Path.cwd().resolve() != PROJECT_ROOT:
+    raise RuntimeError(f"Run from the project root: cd {PROJECT_ROOT}")
+sys.dont_write_bytecode = True
+sys.path.insert(0, str(PROJECT_ROOT))
+
 import numpy as np
 import open3d as o3d
 import torch

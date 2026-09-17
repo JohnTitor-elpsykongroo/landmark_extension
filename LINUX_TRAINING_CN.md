@@ -1,6 +1,6 @@
 # RTX 5090 / Linux：Teeth3DS+ 位点训练与测试识别
 
-本文针对本仓库当前代码，使用 Python 3.10、`.venv`、RTX 5090 和 CUDA 13.0。**命令尚未在目标机器验证**；先完成一例数据与一轮训练的检查，再扩大训练。所有新配置、构建物和输出都放在 `landmark_extension`；原 3dteethland 文件及 Teeth3DS+ 原始数据只读。
+本文针对本仓库当前代码，使用 Python 3.10、`.venv`、RTX 5090 和 CUDA 13.0。**命令尚未在目标机器验证**；先完成一例数据与一轮训练的检查，再扩大训练。`.venv` 建在 `3dteethland` 根目录，所有命令也从该根目录启动；新配置、构建物和输出放在 `landmark_extension`。原 3dteethland 文件及 Teeth3DS+ 原始数据只读。
 
 ## 1. 数据和运行边界
 
@@ -16,11 +16,12 @@
 export PROJECT=/absolute/path/to/3dteethland
 export DATA=/absolute/path/to/Teeth3DS+
 export EXT="$PROJECT/landmark_extension"
-cd "$EXT"
+cd "$PROJECT"
 nvidia-smi
 nvcc --version                         # 应显示 CUDA 13.0；只有驱动不够编译 pointops
 python3.10 -m venv .venv
 source .venv/bin/activate
+export PYTHONDONTWRITEBYTECODE=1
 python -m pip install -U pip setuptools wheel ninja
 python -m pip install torch==2.12.0 torchvision==0.27.0 \
   --index-url https://download.pytorch.org/whl/cu130
@@ -38,7 +39,6 @@ export CUDA_HOME="$(dirname "$(dirname "$(command -v nvcc)")")"
 export TORCH_CUDA_ARCH_LIST=12.0
 export MAX_JOBS=8
 python -m pip install --no-build-isolation "$EXT/build/pointops"
-export PYTHONPATH="$PROJECT${PYTHONPATH:+:$PYTHONPATH}"
 python - <<'PY'
 import torch, torch_scatter, pointops, pytorch_lightning, open3d, pymeshlab
 print('torch', torch.__version__, 'CUDA', torch.version.cuda)
@@ -51,7 +51,7 @@ Linux 还需可用的 C++ 编译器及 `git`；缺少时安装发行版相应的
 
 ## 3. 准备数据视图与配置
 
-在扩展目录运行。下面把每个 OBJ/JSON 文件链接到平坦视图，不复制或修改原始数据。训练读取器会按排序配对文件，因此要先核对缺失配对。不同病例的文件名必须唯一。
+保持工作目录为 `$PROJECT`。下面把每个 OBJ/JSON 文件链接到扩展目录的平坦视图，不复制或修改原始数据。训练读取器会按排序配对文件，因此要先核对缺失配对。不同病例的文件名必须唯一。
 
 ```bash
 mkdir -p "$EXT/data_view"
@@ -69,21 +69,32 @@ assert meshes and meshes == labels, 'missing OBJ/JSON pairs'
 PY
 ```
 
-复制原配置的模型结构到扩展目录，改写路径及初始显存参数。`fold: 0` 表示按病人 ID 做 5 折划分中的第 0 折；生成的 `zainab_fold_*.txt` 会落在当前扩展目录。第一次用少量 epoch 冒烟，再复制配置为正式运行版，给每次运行不同的 `version`。不要使用原配置中作者机器的路径。
+先在扩展目录写固定的病人级验证列表。原项目在 `fold: 0` 时会把 `zainab_fold_*.txt` 写到当前工作目录；这里改用文件路径形式的 `fold`，保证根目录不出现这些文件。然后复制原配置的模型结构到扩展目录，改写路径及初始显存参数。第一次用少量 epoch 冒烟，再复制配置为正式运行版，给每次运行不同的 `version`。不要使用原配置中作者机器的路径。
 
 ```bash
 python - <<'PY'
 import os
+import random
 from pathlib import Path
 import yaml
 project, data, ext = (Path(os.environ[k]) for k in ('PROJECT', 'DATA', 'EXT'))
+landmark_stems = {p.name.split('__')[0] for p in (data / '3DTeethLand_landmarks_train').rglob('*__kpt.json')}
+eligible = sorted(p.name for p in (ext / 'data_view').glob('*.obj') if p.stem in landmark_stems)
+patients = sorted({name.split('_')[0] for name in eligible})
+assert len(patients) >= 5, 'need at least five patients with landmark annotations'
+random.Random(0).shuffle(patients)
+val_patients = set(patients[:max(1, len(patients) // 5)])
+fold_file = ext / 'folds' / 'landmarks_val_seed0.txt'
+fold_file.parent.mkdir(exist_ok=True)
+fold_file.write_text(''.join(name + '\n' for name in eligible if name.split('_')[0] in val_patients))
+print('landmark cases:', len(eligible), 'validation patients:', len(val_patients))
 cfg = yaml.safe_load((project / 'teethland/config/config.yaml').read_text())
 cfg['version'] = 'landmarks_smoke_001'
 cfg['work_dir'] = str(ext / 'runs')
 cfg['datamodule'].update(
     root=str(ext / 'data_view'),
     landmarks_root=str(data / '3DTeethLand_landmarks_train'),
-    fold=0, include_val_as_train=False,
+    fold=str(fold_file), include_val_as_train=False,
     batch_size=1, num_workers=4, persistent_workers=True,
     proposal_points=8000, max_proposals=4,
 )
@@ -110,14 +121,15 @@ PY
 
 ## 4. 训练位点模型
 
-从 `landmark_extension` 执行扩展入口；它调用原项目的 `TeethLandDataModule` 和 `LandmarkNet`，从外部 YAML 读取配置，把 checkpoint 存入新运行目录。
+从项目根目录执行扩展入口；它调用原项目的 `TeethLandDataModule` 和 `LandmarkNet`，从扩展目录的 YAML 读取配置，把 checkpoint 和数据缓存存入新的扩展运行目录。
 
 ```bash
-cd "$EXT"
+cd "$PROJECT"
 source .venv/bin/activate
-export PYTHONPATH="$PROJECT${PYTHONPATH:+:$PYTHONPATH}"
-python run_landmark_train.py --config config-landmarks-smoke.yaml --devices 1 \
-  2>&1 | tee landmarks_smoke_001.log
+set -o pipefail
+python landmark_extension/run_landmark_train.py \
+  --config "$EXT/config-landmarks-smoke.yaml" --devices 1 \
+  2>&1 | tee "$EXT/landmarks_smoke_001.log"
 ```
 
 检查日志中训练/验证病例数、两轮 `loss/val`、`runs/landmarks_smoke_001/checkpoints/` 的 `last.ckpt` 与最佳 `landmarks-*.ckpt`。再复制配置，设置新运行名与计划轮数，例如：
@@ -133,8 +145,9 @@ cfg['version'] = 'landmarks_full_001'
 cfg['model']['landmarks']['epochs'] = 500
 (ext / 'config-landmarks-full.yaml').write_text(yaml.safe_dump(cfg, sort_keys=False))
 PY
-python run_landmark_train.py --config config-landmarks-full.yaml --devices 1 \
-  2>&1 | tee landmarks_full_001.log
+python landmark_extension/run_landmark_train.py \
+  --config "$EXT/config-landmarks-full.yaml" --devices 1 \
+  2>&1 | tee "$EXT/landmarks_full_001.log"
 ```
 
 显存允许后再增加 `batch_size`、`max_proposals` 或 `proposal_points`。显存不足先降低后三项。恢复时指定 `--resume /path/to/last.ckpt`，并使用**新的** `version` 目录。保存最终 YAML、`pip freeze`、训练日志和所用病例清单，保证结果可追溯。
@@ -169,9 +182,9 @@ assert files and all(p.stem.endswith(('_upper', '_lower')) for p in files)
 (ext / 'config-test.yaml').write_text(yaml.safe_dump(cfg, sort_keys=False))
 print('test meshes:', len(files))
 PY
-cd "$EXT"
-python "$PROJECT/infer.py" landmarks --devices 1 --config config-test.yaml \
-  2>&1 | tee landmarks_test_001.log
+cd "$PROJECT"
+python infer.py landmarks --devices 1 --config "$EXT/config-test.yaml" \
+  2>&1 | tee "$EXT/landmarks_test_001.log"
 find "$EXT/predictions/landmarks_test_001" -name '*__kpt.json' | wc -l
 ```
 
@@ -186,12 +199,11 @@ find "$EXT/predictions/landmarks_test_001" -name '*__kpt.json' | wc -l
 单病例，`ID_upper` 换成实际病例名：
 
 ```bash
-cd "$EXT"
+cd "$PROJECT"
 source .venv/bin/activate
-export PYTHONPATH="$PROJECT${PYTHONPATH:+:$PYTHONPATH}"
 export LAND_CKPT=/absolute/path/to/the/best/landmarks-XXX.ckpt
-python infer_fdi_landmarks.py \
-  --config config-landmarks-full.yaml --checkpoint "$LAND_CKPT" \
+python landmark_extension/infer_fdi_landmarks.py \
+  --config "$EXT/config-landmarks-full.yaml" --checkpoint "$LAND_CKPT" \
   --mesh "$DATA/upper/ID/ID_upper.obj" \
   --annotation "$DATA/upper/ID/ID_upper.json" \
   --exclude-landmarks-root "$DATA/3DTeethLand_landmarks_train" \
@@ -201,8 +213,8 @@ python infer_fdi_landmarks.py \
 批量处理上、下颌所有**没有位点标注**的配对病例：
 
 ```bash
-python infer_fdi_landmarks.py \
-  --config config-landmarks-full.yaml --checkpoint "$LAND_CKPT" \
+python landmark_extension/infer_fdi_landmarks.py \
+  --config "$EXT/config-landmarks-full.yaml" --checkpoint "$LAND_CKPT" \
   --input-root "$DATA/upper" "$DATA/lower" \
   --exclude-landmarks-root "$DATA/3DTeethLand_landmarks_train" \
   --out-dir "$EXT/predictions/fdi_batch_001"
