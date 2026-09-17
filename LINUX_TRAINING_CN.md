@@ -121,7 +121,7 @@ PY
 
 ## 4. 训练位点模型
 
-从项目根目录执行扩展入口；它调用原项目的 `TeethLandDataModule` 和 `LandmarkNet`，从扩展目录的 YAML 读取配置，把 checkpoint 和数据缓存存入新的扩展运行目录。
+从项目根目录执行扩展入口；它调用原项目的 `LandmarkNet`，并使用扩展目录中的 `PortableTeethLandDataModule` 修正 Windows/Linux 路径配对及原位点数据集初始化缺少 `norm` 参数的问题。从扩展目录的 YAML 读取配置，把 checkpoint 和数据缓存存入新的扩展运行目录。
 
 ```bash
 cd "$PROJECT"

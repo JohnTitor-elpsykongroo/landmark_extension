@@ -16,6 +16,10 @@ import open3d as o3d
 import torch
 import yaml
 
+from compat import ensure_torchtyping
+
+ensure_torchtyping()
+
 from teethland import PointTensor
 from teethland.data import transforms as T
 from teethland.data.datasets import TeethSegDataset

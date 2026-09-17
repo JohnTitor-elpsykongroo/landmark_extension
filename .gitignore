@@ -1,0 +1,10 @@
+local_smoke/
+build/
+data_view/
+folds/
+runs/
+predictions/
+*.log
+config-landmarks-*.yaml
+config-test.yaml
+test_files.txt

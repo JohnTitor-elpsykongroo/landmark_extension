@@ -15,9 +15,13 @@ import yaml
 from pytorch_lightning.callbacks import LearningRateMonitor, ModelCheckpoint
 from pytorch_lightning.loggers import TensorBoardLogger
 
-from teethland.datamodules import TeethLandDataModule
+from compat import ensure_torchtyping
+
+ensure_torchtyping()
+
 from teethland.data.datasets.cache import DatasetCache
 from teethland.models import LandmarkNet
+from portable_datamodule import PortableTeethLandDataModule
 
 
 def main() -> None:
@@ -45,7 +49,7 @@ def main() -> None:
     DatasetCache.__init__ = scoped_cache_init
 
     pl.seed_everything(cfg["seed"], workers=True)
-    dm = TeethLandDataModule(seed=cfg["seed"], **cfg["datamodule"])
+    dm = PortableTeethLandDataModule(seed=cfg["seed"], **cfg["datamodule"])
     model = LandmarkNet(
         in_channels=dm.num_channels,
         num_classes=dm.num_classes,
